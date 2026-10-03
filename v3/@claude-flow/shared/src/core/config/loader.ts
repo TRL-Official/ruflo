@@ -88,7 +88,7 @@ function loadEnvConfig(): Partial<SystemConfig> {
   // Memory type
   if (process.env.CLAUDE_FLOW_MEMORY_TYPE) {
     const memoryType = process.env.CLAUDE_FLOW_MEMORY_TYPE as NonNullable<SystemConfig['memory']>['type'];
-    if (['sqlite', 'agentdb', 'hybrid', 'redis', 'memory'].includes(memoryType)) {
+    if (['sqlite', 'agentdb', 'hybrid', 'redis', 'memory', 'postgres'].includes(memoryType)) {
       config.memory = {
         ...(defaultSystemConfig.memory ?? { type: 'hybrid' }),
         type: memoryType,

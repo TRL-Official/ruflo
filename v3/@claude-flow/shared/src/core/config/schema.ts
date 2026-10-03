@@ -82,7 +82,7 @@ export const SwarmConfigSchema = z.object({
  * Memory configuration schema
  */
 export const MemoryConfigSchema = z.object({
-  type: z.enum(['sqlite', 'agentdb', 'hybrid', 'redis', 'memory']).default('hybrid'),
+  type: z.enum(['sqlite', 'agentdb', 'hybrid', 'redis', 'memory', 'postgres']).default('hybrid'),
   path: z.string().optional(),
   maxSize: z.number().int().positive().optional(),
   ttlMs: z.number().int().positive().optional(),

@@ -39,6 +39,9 @@ export type DatabaseProvider =
   | 'rvf'
   | 'hybrid'
   | 'agentdb'
+  // Shared across sessions rather than local to one checkout. Never chosen by
+  // auto-detection: it needs a connection string, so it must be asked for.
+  | 'postgres'
   | 'auto';
 
 /**
@@ -329,6 +332,19 @@ export async function createDatabase(
         vectorDimension: dimensions,
         embeddingGenerator,
         maxEntries,
+      });
+      break;
+    }
+
+    case 'postgres': {
+      // `path` is meaningless here — the database is remote. Everything comes
+      // from the connection string (PGSYNC_URL / DATABASE_URL by default).
+      const { PostgresBackend } = await import('./postgres-backend.js');
+      backend = new PostgresBackend({
+        dimensions,
+        defaultNamespace,
+        embeddingGenerator,
+        verbose,
       });
       break;
     }

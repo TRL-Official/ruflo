@@ -205,6 +205,8 @@ export type {
 } from './agentdb-retrieval-guard.js';
 export { SQLiteBackend } from './sqlite-backend.js';
 export type { SQLiteBackendConfig } from './sqlite-backend.js';
+export { PostgresBackend } from './postgres-backend.js';
+export type { PostgresBackendConfig } from './postgres-backend.js';
 export { SqlJsBackend } from './sqljs-backend.js';
 export type { SqlJsBackendConfig } from './sqljs-backend.js';
 export { HybridBackend } from './hybrid-backend.js';

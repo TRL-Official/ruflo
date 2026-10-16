@@ -57,7 +57,9 @@ const POLICY_FILE = 'state.json';
 const LOCK_FILE = 'state.lock';
 const RECEIPT_ARCHIVE_FILE = 'receipts.ledger.jsonl';
 const STATE_ANCHOR_FILE = 'state.anchor.json';
-const LOCK_WAIT_MS = 5_000;
+// [neon-direct] tunable, default 120 s: with the policy state in Neon a 5 s wait failed concurrent appends; a dead
+// holder is still detected by its owner's liveness (lockOwnerIsDead), not by this wait
+const LOCK_WAIT_MS = Number(process.env.RUFLO_POLICY_LOCK_WAIT_MS) || 120_000; /* [uncap] */
 // #3164: without a bound, `state.receipts` grows forever and every
 // transaction's verify/clone/serialize cost is O(all receipts ever issued) —
 // eventually exceeding LOCK_WAIT_MS and timing out every MCP tool call.

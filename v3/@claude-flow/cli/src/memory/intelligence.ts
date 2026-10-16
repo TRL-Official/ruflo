@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { resolveTrainingBackend } from '../ruvector/lora-adapter.js';
 import { getProjectCwd } from '../mcp-tools/types.js';
 import { withStatsFileLock } from './stats-file-lock.js';
+import { NeonReasoningBank } from './neon/neon-reasoning-bank.js';
 
 // ============================================================================
 // Persistence Configuration
@@ -145,10 +146,12 @@ const DEFAULT_SONA_CONFIG: SonaConfig = {
   loraLearningRate: 0.001,
   loraRank: 8,
   ewcLambda: 0.4,
-  maxTrajectorySize: 100,
+  maxTrajectorySize: (Number(process.env.RUFLO_SONA_MAX_TRAJECTORY) || Infinity), /* [uncap] */
   patternThreshold: 0.7,
-  maxSignals: 10000,
-  maxPatterns: 5000
+  maxSignals: Number(process.env.RUFLO_SONA_MAX_SIGNALS) || 10000, /* [uncap] */
+  // Was 5000, with the oldest pattern evicted. No cap unless RUFLO_MAX_PATTERNS is set; with
+  // RUFLO_STORE=neon a set cap is retention in Neon (newest N kept).
+  maxPatterns: Number(process.env.RUFLO_MAX_PATTERNS) || Infinity
 };
 
 // ============================================================================
@@ -251,7 +254,7 @@ class LocalSonaCoordinator {
    */
   async endTrajectory(
     verdict: 'success' | 'failure' | 'partial',
-    bank: LocalReasoningBank
+    bank: ReasoningBankLike
   ): Promise<{ reward: number; patternsUpdated: number }> {
     const rewardMap: Record<string, number> = {
       success: 1.0,
@@ -309,7 +312,7 @@ class LocalSonaCoordinator {
    * increases the pattern's stored confidence by loraLearningRate * reward.
    * Before applying updates, checks EWC penalty to prevent catastrophic forgetting.
    */
-  async distillLearning(bank: LocalReasoningBank): Promise<{
+  async distillLearning(bank: ReasoningBankLike): Promise<{
     patternsDistilled: number;
     ewcPenalty: number;
   }> {
@@ -518,8 +521,13 @@ class LocalReasoningBank {
           }
         }
       }
-    } catch {
-      // Ignore load errors, start fresh
+    } catch (error) {
+      // An unreadable file is NOT an empty store: "starting fresh" here made the next flush
+      // overwrite it with a near-empty one. Keep this process off the file instead.
+      if (existsSync(getPatternsPath())) {
+        this.persistenceEnabled = false;
+        console.error('patterns.json is unreadable — not loading it, and not overwriting it:', (error as Error).message);
+      }
     }
   }
 
@@ -788,7 +796,9 @@ async function loadRuvllmCoordinator(): Promise<any> {
 // ============================================================================
 
 let sonaCoordinator: LocalSonaCoordinator | null = null;
-let reasoningBank: LocalReasoningBank | null = null;
+/** What the rest of this module uses of a ReasoningBank — met by LocalReasoningBank and NeonReasoningBank. */
+type ReasoningBankLike = Pick<LocalReasoningBank, 'store' | 'findSimilar' | 'get' | 'getAll' | 'getByType' | 'delete' | 'clear' | 'stats' | 'flushToDisk'>;
+let reasoningBank: ReasoningBankLike | null = null;
 let intelligenceInitialized = false;
 let globalStats = {
   trajectoriesRecorded: 0,
@@ -1124,7 +1134,8 @@ export async function initializeIntelligence(config?: Partial<SonaConfig>): Prom
     sonaCoordinator = new LocalSonaCoordinator(finalConfig);
 
     // Initialize local ReasoningBank with persistence enabled
-    reasoningBank = new LocalReasoningBank({
+    // RUFLO_STORE=neon keeps the patterns in Neon (./neon/neon-reasoning-bank.ts), not patterns.json.
+    reasoningBank = new (process.env.RUFLO_STORE === 'neon' ? NeonReasoningBank : LocalReasoningBank)({
       maxSize: finalConfig.maxPatterns,
       persistence: true
     });
@@ -1463,7 +1474,7 @@ export function getSonaCoordinator(): LocalSonaCoordinator | null {
 /**
  * Get ReasoningBank for advanced operations
  */
-export function getReasoningBank(): LocalReasoningBank | null {
+export function getReasoningBank(): ReasoningBankLike | null {
   return reasoningBank;
 }
 

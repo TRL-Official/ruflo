@@ -1175,7 +1175,7 @@ export const hiveMindTools: MCPTool[] = [
       });
 
       // Keep only last 100 broadcasts
-      state.sharedMemory.broadcasts = messages.slice(-100);
+      state.sharedMemory.broadcasts = messages.slice(-(Number(process.env.RUFLO_HIVE_BROADCASTS_MAX) || Infinity)); /* [uncap] */
       saveHiveState(state);
 
       return {

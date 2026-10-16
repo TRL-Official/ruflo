@@ -144,7 +144,7 @@ const DEFAULT_CONFIG: QLearningRouterConfig = {
   explorationFinal: 0.01,
   explorationDecay: 10000,
   explorationDecayType: 'exponential',
-  maxStates: 10000,
+  maxStates: (Number(process.env.RUFLO_Q_MAX_STATES) || Infinity), /* [uncap] */
   numActions: 8,
   replayBufferSize: 1000,
   replayBatchSize: 32,

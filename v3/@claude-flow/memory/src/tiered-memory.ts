@@ -141,9 +141,9 @@ function rowToEntry(row: TieredMemoryRow): TieredMemoryEntry {
 }
 
 const VALID_TIERS = ['working', 'episodic', 'semantic'] as const;
-const MAX_PER_TIER = 5000;
-const MAX_ARCHIVED = 5000;
-const MAX_VALUE_LENGTH = 100_000;
+const MAX_PER_TIER = (Number(process.env.RUFLO_TIER_MAX) || Infinity); /* [uncap] */
+const MAX_ARCHIVED = (Number(process.env.RUFLO_TIER_MAX_ARCHIVED) || Infinity); /* [uncap] */
+const MAX_VALUE_LENGTH = (Number(process.env.RUFLO_TIER_MAX_VALUE) || Infinity); /* [uncap] */
 const MAX_QUERY_LENGTH = 10_000;
 /** Upper bound on entries scanned by one recall (the store itself is bounded far below this). */
 const MAX_RECALL_SCAN = 50_000;

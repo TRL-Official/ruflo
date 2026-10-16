@@ -181,7 +181,10 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
                     CASE WHEN x.coll = ANY($3::text[]) AND jsonb_typeof(x.body->'embedding') = 'array'
                           AND jsonb_array_length(x.body->'embedding') = ${DIM}
                          THEN (x.body->>'embedding')::vector END
-             FROM jsonb_to_recordset($2::jsonb) AS x(ord int, coll text, rid text, body jsonb) ORDER BY x.ord
+             -- e->'body', not jsonb_to_recordset's body column: that turns a JSON null into SQL NULL,
+             -- and a record whose value is null ({"lastScan": null}) failed the NOT NULL column
+             FROM (SELECT a.n AS ord, a.e->>'coll' AS coll, a.e->>'rid' AS rid, coalesce(a.e->'body', 'null'::jsonb) AS body
+                   FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS a(e, n)) x ORDER BY x.ord
              ON CONFLICT (store, coll, rid) DO UPDATE SET body = excluded.body, vec = excluded.vec,
                     ver = ${T}.ver + 1, updated_at = now()
              WHERE ${T}.body IS DISTINCT FROM excluded.body`,

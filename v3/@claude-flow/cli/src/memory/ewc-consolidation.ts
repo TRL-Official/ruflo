@@ -155,7 +155,7 @@ interface GradientSample {
 
 const DEFAULT_EWC_CONFIG: EWCConfig = {
   lambda: 0.4,
-  maxPatterns: 1000,
+  maxPatterns: (Number(process.env.RUFLO_EWC_MAX_PATTERNS) || Infinity), /* [uncap] */
   fisherDecayRate: 0.01,
   importanceThreshold: 0.3,
   storagePath: path.join(getProjectRoot(), '.swarm', 'ewc-fisher.json'),
@@ -763,7 +763,7 @@ export class EWCConsolidator {
         },
         globalFisher: this.globalFisher,
         patterns: Array.from(this.patterns.entries()),
-        consolidationHistory: this.consolidationHistory.slice(-100),
+        consolidationHistory: this.consolidationHistory.slice(-(Number(process.env.RUFLO_EWC_MAX_HISTORY) || Infinity)), /* [uncap] */
         savedAt: Date.now()
       };
 

@@ -210,7 +210,7 @@ function saveRoutingOutcomes(outcomes: RoutingOutcome[]): void {
     const dir = dirname(ROUTING_OUTCOMES_PATH);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     // Cap at 500 entries to bound file size
-    const capped = outcomes.slice(-500);
+    const capped = outcomes.slice(-(Number(process.env.RUFLO_ROUTING_OUTCOMES_MAX) || Infinity)); /* [uncap] */
     writeFileSync(ROUTING_OUTCOMES_PATH, JSON.stringify({ outcomes: capped }, null, 2));
     // A long-lived MCP process must observe the new label on the next route.
     // The prior singleton cache made the learned store inert until restart.

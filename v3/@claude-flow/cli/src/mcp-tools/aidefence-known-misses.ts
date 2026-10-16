@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const MAX_ENTRIES = 500;
+const MAX_ENTRIES = (Number(process.env.RUFLO_AIDEFENCE_MISSES_MAX) || Infinity); /* [uncap] */
 
 export interface KnownMiss {
   hash: string;

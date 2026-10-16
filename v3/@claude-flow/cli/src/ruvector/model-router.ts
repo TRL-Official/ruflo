@@ -1200,8 +1200,8 @@ export class ModelRouter {
     });
 
     // Keep history bounded
-    if (this.state.learningHistory.length > 100) {
-      this.state.learningHistory = this.state.learningHistory.slice(-100);
+    if (this.state.learningHistory.length > (Number(process.env.RUFLO_MODEL_ROUTER_HISTORY_MAX) || Infinity)) { /* [uncap] */
+      this.state.learningHistory = this.state.learningHistory.slice(-(Number(process.env.RUFLO_MODEL_ROUTER_HISTORY_MAX) || Infinity));
     }
 
     if (outcome === 'failure') {

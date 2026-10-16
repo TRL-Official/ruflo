@@ -160,8 +160,8 @@ export const performanceTools: MCPTool[] = [
 
       store.metrics.push(currentMetrics);
       // Keep last 100 metrics
-      if (store.metrics.length > 100) {
-        store.metrics = store.metrics.slice(-100);
+      if (store.metrics.length > (Number(process.env.RUFLO_PERF_METRICS_MAX) || Infinity)) { /* [uncap] */
+        store.metrics = store.metrics.slice(-(Number(process.env.RUFLO_PERF_METRICS_MAX) || Infinity));
       }
       savePerfStore(store);
 

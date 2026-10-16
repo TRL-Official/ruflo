@@ -66,7 +66,7 @@ export function allDeterministic(recorded: RecordedRun[], run: RunFn): boolean {
  * latest for an id.
  */
 export class ReplayStore {
-  constructor(private readonly filePath: string, private readonly maxEntries = 10000) {}
+  constructor(private readonly filePath: string, private readonly maxEntries = (Number(process.env.RUFLO_HARNESS_ARCHIVE_MAX) || Infinity)) {} /* [uncap] */
 
   private load(): RecordedRun[] {
     try {

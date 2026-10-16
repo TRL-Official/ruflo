@@ -740,8 +740,7 @@ export async function getHNSWIndex(options?: {
         const result = sqlDb.exec(`
           SELECT id, key, namespace, content, embedding
           FROM memory_entries
-          WHERE status = 'active' AND embedding IS NOT NULL
-          LIMIT 10000
+          WHERE status = 'active' AND embedding IS NOT NULL /* [uncap] was LIMIT 10000 */
         `);
 
         if (result[0]?.values) {
@@ -3462,7 +3461,7 @@ export async function searchEntries(options: {
       whereParams.push(...provenanceFilter);
     }
     const searchStmt = db.prepare(
-      `SELECT id, key, namespace, content, embedding, provenance_type FROM memory_entries WHERE ${whereClauses.join(' AND ')} LIMIT 1000`
+      `SELECT id, key, namespace, content, embedding, provenance_type FROM memory_entries WHERE ${whereClauses.join(' AND ')}` /* [uncap] was LIMIT 1000 */
     );
     if (whereParams.length > 0) {
       searchStmt.bind(whereParams);

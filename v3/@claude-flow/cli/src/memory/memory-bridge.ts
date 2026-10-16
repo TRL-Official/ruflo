@@ -1518,8 +1518,7 @@ export async function bridgeSearchEntries(options: {
         SELECT id, key, namespace, content, embedding, provenance_type
         FROM memory_entries
         WHERE ${liveMemoryRowSql()} ${whereExtra}
-        ORDER BY updated_at DESC
-        LIMIT ${resolveBridgeSearchWindow()}
+        ORDER BY updated_at DESC /* [uncap] was LIMIT 1000; upstream 3.60 caps it at resolveBridgeSearchWindow() (10,000) */
       `);
       rows = filterParams.length > 0 ? stmt.all(...filterParams) : stmt.all();
     } catch {
@@ -2373,8 +2372,7 @@ export async function bridgeSearchBruteForceCosine(
         SELECT id, key, namespace, content, embedding
         FROM memory_entries
         WHERE ${liveMemoryRowSql()} AND embedding IS NOT NULL ${nsFilter}
-        ORDER BY updated_at DESC
-        LIMIT 10000
+        ORDER BY updated_at DESC /* [uncap] was LIMIT 10000 */
       `);
       rows = nsFilter
         ? stmt.all(options!.namespace)

@@ -108,7 +108,7 @@ export interface AntiPattern {
  * runaway-storage guard. Deduped by fingerprint at the call site.
  */
 export class AntiPatternArchive {
-  constructor(private readonly filePath: string, private readonly maxEntries = 10000) {}
+  constructor(private readonly filePath: string, private readonly maxEntries = (Number(process.env.RUFLO_HARNESS_ARCHIVE_MAX) || Infinity)) {} /* [uncap] */
 
   private load(): AntiPattern[] {
     try {

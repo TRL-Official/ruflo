@@ -47,7 +47,7 @@ export interface UpdateExecutionResult {
 }
 
 const HISTORY_FILE = path.join(os.homedir(), '.claude-flow', 'update-history.json');
-const MAX_HISTORY_ENTRIES = 100;
+const MAX_HISTORY_ENTRIES = (Number(process.env.RUFLO_UPDATE_HISTORY_MAX) || Infinity); /* [uncap] */
 
 function ensureDir(): void {
   const dir = path.dirname(HISTORY_FILE);

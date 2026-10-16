@@ -8,7 +8,7 @@ import { MISSION_OBSERVATION } from './fixtures/missions'
 import { HIVE_TOKEN, RUFLO_FILES } from './fixtures/ruflo-run'
 import { FIND_OUT, LIST_OUT, LS_GLOBAL, USE_OUT } from './fixtures/skills'
 import { VEC_OUT } from './fixtures/vector'
-import { cliAnswer, command, elementsOf, fakeRuflo, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
+import { inputKeys, cliAnswer, command, elementsOf, fakeRuflo, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
 
 const HOME_FILES = {
   '.claude/plugins/installed_plugins.json': JSON.stringify({
@@ -40,7 +40,7 @@ describe('vector lab', () => {
     expect(text).toMatch(/pub \n SHARE \.+/)
     expect(text).toMatch(/del \n DELETE \.+/)
     expect(text).toContain('rvf_delete is an MCP tool of the ruvector server with no CLI verb')
-    expect(elementsOf(tree, 'Input').map(keyOf)).toEqual(['vec-in-brain', 'vec-in-rvfPath', 'vec-in-rvfArg', 'vec-in-sql', 'vec-in-target', 'vec-in-worker', 'vec-in-task'])
+    expect(inputKeys(tree)).toEqual(['vec-in-brain', 'vec-in-rvfPath', 'vec-in-rvfArg', 'vec-in-sql', 'vec-in-target', 'vec-in-worker', 'vec-in-task'])
     expect(elementsOf(tree, 'Button').map(keyOf)).toEqual(expect.arrayContaining(['vec-brain-status', 'vec-brain-share', 'vec-rvf-query', 'vec-sql', 'vec-hooks-stats', 'vec-identity-generate']))
     expect(elementsOf(tree, 'Button').map(keyOf)).not.toContain('vec-rvf-delete')
     expect(vecRuns()).toHaveLength(0)

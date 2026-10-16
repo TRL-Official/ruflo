@@ -3,7 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import { MEM_OUT } from './fixtures/memory'
 import { RUFLO_FILES } from './fixtures/ruflo-run'
 import { drawn, memoryWorld } from './fixtures/views'
-import { cliAnswer, command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
+import { inputKeys, cliAnswer, command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
 
 describe('labs and starts', () => {
   test('cost: a preset asks first, names the exact change, and sends one fixed argv with JSON stdin on yes', { options: { boot: false } }, async ($, on) => {
@@ -96,7 +96,7 @@ describe('labs and starts', () => {
     expect(text).toContain('2 more rows in .swarm/agentdb-memory.db')
     expect(text).toMatch(/ ◆ beta \.+/)
     expect(text).toMatch(/del \n DELETE \.+/)
-    expect(elementsOf(tree, 'Input').map(keyOf)).toEqual(['mem-query', 'mem-namespace', 'mem-key', 'mem-value', 'mem-text'])
+    expect(inputKeys(tree)).toEqual(['mem-query', 'mem-namespace', 'mem-key', 'mem-value', 'mem-text'])
     expect(elementsOf(tree, 'Button').map(keyOf)).toEqual(expect.arrayContaining(['mem-ns-0', 'mem-open-0', 'mem-del-0', 'mem-lab-mem-stats', 'mem-lab-mem-cleanup', 'mem-lab-mem-rabitq-build']))
     // Opening it runs only its two local probes.
     expect(world.runs.filter(argv => /memory (retrieve|search|store|delete|export)|mcp exec -t (memory_|agentdb_|embeddings_)/.test(argv.join(' ')))).toEqual([])

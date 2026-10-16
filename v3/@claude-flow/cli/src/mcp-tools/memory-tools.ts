@@ -16,6 +16,7 @@ import { join, resolve } from 'path';
 import { createHash } from 'crypto';
 import type { MCPTool } from './types.js';
 import { validateIdentifier } from './validate-input.js';
+import { DEFAULT_SEARCH_THRESHOLD, nearMisses } from '../memory/search-defaults.js';
 
 // Legacy JSON store interface (for migration)
 interface LegacyMemoryEntry {
@@ -275,6 +276,19 @@ async function getMemoryFunctions() {
     initializeMemoryDatabase,
     checkMemoryInitialization,
   };
+}
+
+/**
+ * Path of the CLI's own store (.swarm/memory.db or CLAUDE_FLOW_DB_PATH), or
+ * undefined when the memory module cannot say (#4148). Never throws.
+ */
+async function resolveCliStorePath(): Promise<string | undefined> {
+  try {
+    const mod = await import('../memory/memory-initializer.js');
+    return typeof mod.resolveDbPath === 'function' ? mod.resolveDbPath() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -623,7 +637,7 @@ export const memoryTools: MCPTool[] = [
         query: { type: 'string', description: 'Search query (semantic similarity)' },
         namespace: { type: 'string', description: 'Namespace to search (default: all namespaces — omit to search across every namespace)' },
         limit: { type: 'number', description: 'Maximum results (default: 10)' },
-        threshold: { type: 'number', description: 'Minimum raw retrieval relevance 0-1 for candidate admission, applied per query before SmartRetrieval ranking; not a floor on rankingScore (default: 0.3)' },
+        threshold: { type: 'number', description: 'Minimum raw retrieval relevance 0-1 for candidate admission, applied per query before SmartRetrieval ranking; not a floor on rankingScore (default: 0.2; calibrated for the bundled embedding model, pass 0 to see every match)' },
         smart: { type: 'boolean', description: 'Enable SmartRetrieval — query expansion, RRF fusion, recency boost, MMR diversity; preserves raw similarity and adds rankingScore (default: false)' },
         provenance_filter: {
           type: 'array',
@@ -654,7 +668,8 @@ export const memoryTools: MCPTool[] = [
       // in the search layer actually fires.
       const namespace = input.namespace as string | undefined;
       const limit = (input.limit as number) ?? 10;
-      const threshold = (input.threshold as number) ?? 0.3;
+      const threshold = (input.threshold as number) ?? DEFAULT_SEARCH_THRESHOLD;
+      const thresholdWasDefault = input.threshold === undefined || input.threshold === null;
 
       validateMemoryInput(undefined, undefined, query, namespace);
 
@@ -729,10 +744,15 @@ export const memoryTools: MCPTool[] = [
               };
             });
 
+            const smartNearMisses = results.length === 0 && thresholdWasDefault
+              ? await nearMisses(searchEntries, { query, namespace, provenanceFilter })
+              : undefined;
+
             return {
               query,
               results,
               total: results.length,
+              ...(smartNearMisses ?? {}),
               searchTime: `${duration.toFixed(2)}ms`,
               backend: 'SmartRetrieval (RRF + MMR + Recency)',
               stats: smartResult.stats,
@@ -782,10 +802,15 @@ export const memoryTools: MCPTool[] = [
           };
         });
 
+        const nearMissInfo = results.length === 0 && thresholdWasDefault
+          ? await nearMisses(searchEntries, { query, namespace, provenanceFilter })
+          : undefined;
+
         return {
           query,
           results,
           total: results.length,
+          ...(nearMissInfo ?? {}),
           searchTime: `${duration.toFixed(2)}ms`,
           backend: 'HNSW + sql.js',
           ...(smartFallbackReason ? { smartFallback: smartFallbackReason } : {}),
@@ -1477,7 +1502,8 @@ export const memoryTools: MCPTool[] = [
       const dryRun = input.dryRun !== false; // default true
       const namespace = input.namespace ? String(input.namespace) : undefined;
       if (namespace) { const v = validateIdentifier(namespace, 'namespace'); if (!v.valid) throw new Error(v.error); }
-      const all = await listEntries({ limit: 100000, namespace });
+      // #4056: TTL hides expired rows from normal reads, so the cleanup has to ask for them.
+      const all = await listEntries({ limit: 100000, namespace, includeExpired: true });
       const now = Date.now();
       const expired = all.entries.filter(e => {
         const exp = (e as { expiresAt?: string | number | null }).expiresAt;
@@ -1564,7 +1590,49 @@ export const memoryTools: MCPTool[] = [
       // entry body. Without this, `value` is always null because listEntries
       // strips content by default (callers pay for the JSON parse only when
       // they need it).
-      const all = await listEntries({ limit: 100000, namespace, includeContent: true });
+      // A successful export must cover the whole reported store. Read all
+      // pages before touching an existing snapshot, including on read failure.
+      type ExportEntry = Awaited<ReturnType<typeof listEntries>>['entries'][number];
+      const readStore = async (dbPath?: string): Promise<{ entries: ExportEntry[] } | { error: string }> => {
+        const out: ExportEntry[] = [];
+        let total: number | undefined;
+        do {
+          const page = await listEntries({ limit: 10000, offset: out.length, namespace, includeContent: true, ...(dbPath ? { dbPath } : {}) });
+          if (!page.success) return { error: page.error || 'Could not read memory for export' };
+          total ??= page.total;
+          if (page.entries.length === 0 && out.length < total) {
+            return { error: `Incomplete memory export: read ${out.length} of ${total} entries` };
+          }
+          out.push(...page.entries);
+        } while (out.length < total);
+        return { entries: out };
+      };
+      const primary = await readStore();
+      if ('error' in primary) return { error: primary.error };
+      // #4148: the default reader is the AgentDB bridge, but the CLI's own store
+      // (.swarm/memory.db, possibly encrypted) can hold rows the bridge never
+      // sees, so an export silently covered one store and reported success. Read
+      // the CLI store too and merge, newest copy of a (namespace, key) winning.
+      const warnings: string[] = [];
+      const stores: Array<{ store: string; entries: number }> = [{ store: 'default', entries: primary.entries.length }];
+      const merged = new Map<string, ExportEntry>();
+      const keep = (e: ExportEntry): void => {
+        const id = `${e.namespace}\u0000${e.key}`;
+        const have = merged.get(id);
+        if (!have || String(e.updatedAt) > String(have.updatedAt)) merged.set(id, e);
+      };
+      primary.entries.forEach(keep);
+      const cliStore = await resolveCliStorePath();
+      if (cliStore && existsSync(cliStore)) {
+        const secondary = await readStore(cliStore);
+        if ('error' in secondary) {
+          warnings.push(`Could not read the CLI store ${cliStore} (${secondary.error}); the export covers the AgentDB store only.`);
+        } else {
+          stores.push({ store: cliStore, entries: secondary.entries.length });
+          secondary.entries.forEach(keep);
+        }
+      }
+      const all = { entries: [...merged.values()] };
       const payload = {
         schema: 'ruflo-memory-export/v1',
         exportedAt: new Date().toISOString(),
@@ -1587,6 +1655,8 @@ export const memoryTools: MCPTool[] = [
         outputPath,
         format: (input.format as string) || 'json',
         exported: { entries: all.entries.length, vectors: vectorsWithEmb, patterns: 0 },
+        stores,
+        ...(warnings.length ? { warnings } : {}),
         fileSize: `${Buffer.byteLength(JSON.stringify(payload))}B`,
         note: input.format === 'csv' ? 'CSV not implemented yet — wrote JSON' : undefined,
       };
@@ -1642,17 +1712,25 @@ export const memoryTools: MCPTool[] = [
           if (keyError) throw new Error(`${keyError}: ${JSON.stringify(e.key)}`);
         }
       }
-      let imported = 0; let skipped = 0;
+      let imported = 0; let skipped = 0; let failed = 0;
+      const errors: string[] = [];
       for (const e of entries) {
         if (!e || typeof e.key !== 'string') { skipped++; continue; }
         const value = typeof e.value === 'string' ? e.value : JSON.stringify(e.value ?? null);
         try {
           const result = await storeEntry({ key: e.key, value, namespace: nsOverride ?? e.namespace ?? 'default', upsert: input.merge !== false, dbPath });
-          if (result.success) { imported++; if (result.embedding) vectors++; }
-          else skipped++;
-        } catch { skipped++; }
+          if (!result.success) throw new Error(result.error || 'Memory write was rejected');
+          imported++;
+          if (result.embedding) vectors++;
+        } catch (error) {
+          failed++;
+          if (errors.length < 10) errors.push(`${e.key}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       return {
+        success: failed === 0,
+        error: failed > 0 ? `${failed} memory write(s) failed: ${errors.join('; ')}` : undefined,
+        failed,
         inputPath,
         imported: { entries: imported, vectors, patterns: 0 },
         skipped,

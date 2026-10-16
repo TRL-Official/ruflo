@@ -6,7 +6,7 @@ import type { TestBody } from 'claude-code/testing'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { RUFLO_FILES } from './fixtures/ruflo-run'
-import { command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
+import { inputKeys, command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
 
 const keys = (tree: Parameters<typeof elementsOf>[0]) => elementsOf(tree, 'Button').map(keyOf)
 
@@ -38,7 +38,7 @@ describe('learning page', () => {
     const seen = new Set<string>()
     const mark = (text: string) => /● ([A-Z]+)/.exec(text)?.[1]
 
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6 && seen.size < 2; i++) {
       await new Promise(resolve => setTimeout(resolve, 400))
       await pane.press({ key: 'sec-learn-config' })
 
@@ -80,7 +80,7 @@ describe('learning page', () => {
     const order = keys(open)
 
     expect(order).toEqual(expect.arrayContaining(['run-nn-pretrain-shallow', 'run-nn-pretrain-medium', 'run-nn-pretrain-deep', 'run-nn-consolidate']))
-    expect(elementsOf(open, 'Input').map(keyOf)).toEqual(expect.arrayContaining(['in-nn-pattern-search', 'in-nn-pattern-store']))
+    expect(inputKeys(open)).toEqual(expect.arrayContaining(['in-nn-pattern-search', 'in-nn-pattern-store']))
     await pane.press({ key: 'run-nn-pretrain-medium' })
 
     const asked = await pane.drawn()

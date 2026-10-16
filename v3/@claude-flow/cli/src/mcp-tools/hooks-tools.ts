@@ -9,6 +9,7 @@ import * as nodeFs from 'fs';
 import { dirname, join, resolve } from 'path';
 import { type MCPTool, getProjectCwd } from './types.js';
 import { validateIdentifier, validateText, validatePath } from './validate-input.js';
+import { commandRecordingDisabled, redactCommandForStorage } from '../services/command-recording.js';
 import { checkCommandLoop, recordCommandOutcome } from './tool-loop-guardrail.js';
 import {
   buildLearnedRoutingPatterns,
@@ -1203,13 +1204,36 @@ export const hooksPostCommand: MCPTool = {
     // repeated consecutive failures of the same command.
     recordCommandOutcome(command, success);
 
+    // #4056: command history is opt-out (CLAUDE_FLOW_HOOKS_RECORD_COMMANDS=0,
+    // CLAUDE_FLOW_HOOKS_ENABLED=false, or hooks.recordCommands=false in the
+    // config). The circuit breaker above is in-memory only; nothing below
+    // runs when recording is off, so no command text reaches the store or
+    // the trajectory pipeline.
+    if (commandRecordingDisabled(process.env, getProjectCwd())) {
+      return {
+        recorded: false,
+        disabled: true,
+        command: undefined,
+        exitCode,
+        success,
+        timestamp: new Date().toISOString(),
+        _storedIn: 'none' as const,
+        learningPath: 'recorded-only' as const,
+        trajectoriesDelta: 0,
+        note: 'Command recording is switched off (CLAUDE_FLOW_HOOKS_RECORD_COMMANDS / CLAUDE_FLOW_HOOKS_ENABLED / hooks.recordCommands); nothing was stored.',
+      };
+    }
+
+    // What is stored is the redacted, length-capped form, never the raw text.
+    const storedCommand = redactCommandForStorage(command);
+
     // Persist command outcome via AgentDB
     let _storedIn: 'agentdb' | 'json-store' | 'none' = 'none';
     try {
       const bridge = await import('../memory/memory-bridge.js');
       const stored = await bridge.bridgeStoreEntry({
         key: `cmd-${Date.now()}`,
-        value: JSON.stringify({ command, exitCode, success }),
+        value: JSON.stringify({ command: storedCommand, exitCode, success }),
         namespace: 'commands',
         tags: [success ? 'success' : 'error'],
         ttl,
@@ -1229,7 +1253,7 @@ export const hooksPostCommand: MCPTool = {
         }
         const key = `cmd-${now}`;
         store.entries[key] = {
-          key, value: JSON.stringify({ command, exitCode, success }), namespace: 'commands',
+          key, value: JSON.stringify({ command: storedCommand, exitCode, success }), namespace: 'commands',
           storedAt: new Date(now).toISOString(), lastAccessed: new Date(now).toISOString(), accessCount: 0,
           expiresAt: new Date(now + ttl * 1000).toISOString(),
         };
@@ -1250,8 +1274,8 @@ export const hooksPostCommand: MCPTool = {
       await intel.recordTrajectory(
         [{
           type: 'action',
-          content: `Command \`${command.slice(0, 200)}\` exited ${exitCode} (${success ? 'success' : 'failure'})`,
-          metadata: { hook: 'post-command', command: command.slice(0, 500), exitCode, success },
+          content: `Command \`${storedCommand.slice(0, 200)}\` exited ${exitCode} (${success ? 'success' : 'failure'})`,
+          metadata: { hook: 'post-command', command: storedCommand.slice(0, 500), exitCode, success },
           timestamp: Date.now(),
         }],
         success ? 'success' : 'failure',
@@ -1336,6 +1360,51 @@ export const hooksRoute: MCPTool = {
       } catch {
         // AgentDB router not available — fall through to local routing
       }
+
+      // Trajectory learning persists SONA outcomes separately from the local
+      // semantic index. Only consume an eligible learned pattern here; native,
+      // Q-learning and keyword suggestions retain their existing routing paths.
+      try {
+        const sonaStart = performance.now();
+        const sona = await getSONAOptimizer();
+        const suggestion = await sona?.getRoutingSuggestion(task);
+        const { isSupportedSonaAgent } = await import('../memory/sona-optimizer.js');
+        if (suggestion?.source === 'sona-pattern'
+          && Number.isFinite(suggestion.confidence)
+          && suggestion.confidence >= 0.6 && suggestion.confidence <= 1
+          && isSupportedSonaAgent(suggestion.agent)) {
+          const confidence = Math.round(suggestion.confidence * 100) / 100;
+          const complexity = task.length > 200 ? 'high' : task.length < 50 ? 'low' : 'medium';
+          return {
+            task,
+            routing: { method: 'sona-pattern', backend: 'SONA persisted keyword patterns', latencyMs: performance.now() - sonaStart, throughput: 'N/A' },
+            matched: true,
+            matchedPattern: 'sona-pattern',
+            semanticMatches: [],
+            primaryAgent: {
+              type: suggestion.agent,
+              confidence,
+              reason: `Persisted SONA outcome pattern (${Math.round(suggestion.confidence * 100)}% confidence)`,
+            },
+            alternativeAgents: suggestion.alternatives
+              .filter(alternative => isSupportedSonaAgent(alternative.agent) && Number.isFinite(alternative.score))
+              .map(alternative => ({
+                type: alternative.agent,
+                confidence: Math.round(alternative.score * 100) / 100,
+                reason: 'Alternative from persisted SONA patterns',
+              })),
+            estimatedMetrics: {
+              successProbability: confidence,
+              estimatedDuration: complexity === 'high' ? '2-4 hours' : complexity === 'medium' ? '30-60 min' : '10-30 min',
+              complexity,
+            },
+            swarmRecommendation: null,
+            learning: { source: suggestion.source, matchedKeywords: suggestion.matchedKeywords },
+          };
+        }
+      } catch {
+        // Optional SONA state unavailable — preserve the existing local route.
+      }
     }
 
     return routeTaskLocal(task, context, useSemanticRouter);
@@ -1344,8 +1413,8 @@ export const hooksRoute: MCPTool = {
 
 /**
  * hooks_route's local routing (semantic index + keyword fallback), run after the
- * AgentDB pre-route. Shared with {@link routeTaskForBench} so the benchmark
- * measures exactly the path hooks_route takes. (Body kept at its original
+ * AgentDB and eligible SONA pre-routes. Shared with {@link routeTaskForBench}
+ * so the benchmark measures this local path. (Body kept at its original
  * indentation to keep this refactor's diff small.)
  */
 async function routeTaskLocal(
@@ -2758,8 +2827,12 @@ export const hooksSessionEnd: MCPTool = {
       // after the command has completed all logical work (#2691).
       try {
         await bridge?.shutdownBridge();
-      } catch {
-        // Cleanup is best-effort and must not fail session-end.
+      } catch (err) {
+        // Cleanup is best-effort and must not fail session-end, but a failed
+        // AgentDB persist (lock/concurrent writer) is never silent.
+        if ((err as { code?: unknown } | null)?.code === 'AGENTDB_LOCK_UNRECOVERABLE') {
+          process.stderr.write(`[ruflo] warning: ${(err as Error).message}\n`);
+        }
       }
     }
 
@@ -3349,7 +3422,7 @@ export const hooksTrajectoryEnd: MCPTool = {
     } catch { /* prototype path — never blocks trajectory finalization */ }
 
     // SONA Learning - process trajectory outcome for routing optimization
-    let sonaResult: { learned: boolean; patternKey: string; confidence: number } = {
+    let sonaResult: { learned: boolean; patternKey: string; confidence: number; reinforcedNeighbour?: boolean; routingGate?: { threshold: number; confidence: number; reached: boolean; successesNeeded: number } } = {
       learned: false, patternKey: '', confidence: 0
     };
     let ewcResult: { consolidated: boolean; penalty: number } = {
@@ -3377,6 +3450,8 @@ export const hooksTrajectoryEnd: MCPTool = {
             learned: result.learned,
             patternKey: result.patternKey,
             confidence: result.confidence,
+            reinforcedNeighbour: result.reinforcedNeighbour,
+            routingGate: result.routingGate,
           };
         } catch {
           // SONA learning failed, continue without it
@@ -3454,19 +3529,23 @@ export const hooksTrajectoryEnd: MCPTool = {
       } catch { /* intelligence module not loadable — keep sona-only behaviour */ }
     }
 
-    // #2351: when an agent calls trajectory-end with no recorded steps but a
-    // non-empty `feedback` string, the feedback was previously dropped on the
-    // floor — `patternsExtracted` reported 0 and `pattern-search` never
-    // surfaced it. Step-less trajectories are the common case for LLM agents
-    // (nothing forces step logging mid-task), and feedback is often the most
-    // distilled lesson available. Route it through the same store + embed
-    // path that pattern-store uses so it becomes searchable. Best-effort:
-    // failures here must not turn the trajectory-end call itself into a
-    // failure — the trajectory record was already persisted above.
+    // #2351: when an agent calls trajectory-end with a non-empty `feedback`
+    // string, the feedback was previously dropped on the floor —
+    // `patternsExtracted` reported 0 and `pattern-search` never surfaced it.
+    // Route it through the same store + embed path that pattern-store uses
+    // so it becomes searchable. Best-effort: failures here must not turn the
+    // trajectory-end call itself into a failure — the trajectory record was
+    // already persisted above.
+    //
+    // #3662: #2351's original fix gated this on `!hasSteps` (step-less
+    // trajectories only). The common start -> step -> end path (the one real
+    // agents actually use) therefore recorded SONA state while leaving the
+    // feedback unindexed. Non-empty feedback is promoted regardless of
+    // whether steps were recorded — a trajectory's steps and its distilled
+    // feedback are not mutually exclusive evidence.
     let feedbackDistilled: { stored: boolean; patternId?: string; controller?: string } = { stored: false };
-    const hasSteps = !!trajectory && trajectory.steps.length > 0;
     const trimmedFeedback = typeof feedback === 'string' ? feedback.trim() : '';
-    if (trajectory && !hasSteps && trimmedFeedback.length > 0) {
+    if (trajectory && trimmedFeedback.length > 0) {
       const distilledPatternId = `pattern-feedback-${trajectoryId}-${Date.now()}`;
       const patternMetadata: Record<string, unknown> = {
         sourceTrajectoryId: trajectoryId,
@@ -3541,6 +3620,8 @@ export const hooksTrajectoryEnd: MCPTool = {
         sonaUpdate: sonaResult.learned,
         sonaPatternKey: sonaResult.patternKey || undefined,
         sonaConfidence: sonaResult.confidence || undefined,
+        sonaReinforcedNeighbour: sonaResult.reinforcedNeighbour || undefined,
+        sonaRoutingGate: sonaResult.routingGate,
         ewcConsolidation: ewcResult.consolidated,
         ewcPenalty: ewcResult.penalty || undefined,
         patternsExtracted,
@@ -3601,7 +3682,7 @@ export const hooksPatternStore: MCPTool = {
 
     // Fallback: persist using memory-initializer store
     let storeResult: { success: boolean; id?: string; embedding?: { dimensions: number; model: string }; error?: string } = { success: false };
-    if (!reasoningResult) {
+    if (!reasoningResult?.success) {
       const storeFn = await getRealStoreFunction();
       if (storeFn) {
         try {

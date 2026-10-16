@@ -50,10 +50,15 @@ BAD='TypeError|ReferenceError|Cannot read prop|\[object |ui\.render hook skipped
 for entry in "${VIEWS[@]}"; do
   id="${entry%%|*}"
   label="${entry#*|}"
+  # The Terminal and Skills views hold a focused field: Escape first, so the next slash command reaches Claude's own prompt.
+  tmux_keys Escape
+  sleep 1
   tmux_cmd "/ruflo $id"
   sleep 2
-  tmux_shot "../screens/$id"
+  tmux_shot "screens/$id"
   shot="$OUT/screens/$id.txt"
+  # A capture that was not written is a failure, never a pass: grep on a missing file finds no error text.
+  if [[ ! -s "$shot" ]]; then fail "V-$id" "/ruflo $id was captured" "screens/$id.txt"; continue; fi
   if grep -qiF -- "${label%% *}" "$shot"; then pass "V-$id" "/ruflo $id draws $label" "screens/$id.txt"; else fail "V-$id" "/ruflo $id draws $label" "screens/$id.txt"; fi
   if grep -qE "$BAD" "$shot"; then fail "V-$id" "no render error on screen ($id)" "screens/$id.txt"; else pass "V-$id" "no render error on screen ($id)" "screens/$id.txt"; fi
 done

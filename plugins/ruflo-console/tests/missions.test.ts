@@ -41,6 +41,7 @@ describe('mission control', () => {
     const { pane, clock } = await opened($, on, { ...RUFLO_FILES, '.claude-flow/missions/observation.json': MISSION_OBSERVATION })
 
     await pane.press({ key: 'mc-tab-record' })
+    await $.command.run(command('next'))
 
     const text = textOf(await pane.drawn())
 
@@ -71,7 +72,7 @@ describe('mission control', () => {
     expect(text).toContain('SPARC plan')
     expect(text).toContain('Reproduce the problem with a failing case')
     expect(text).toMatch(/Research.*→.*Build.*→.*Test.*→.*Validate.*→.*Secure.*→.*Learn/)
-    expect(text).toContain('● bug fix')
+    expect(text).toContain('bug fix · standard')
     expect(toolsRun(world.runs)).toEqual([])
 
     const field = (tree: Awaited<ReturnType<typeof pane.drawn>>) => elementsOf(tree, 'Input').find(input => keyOf(input) === 'mc-goal') as { props?: { value?: string } } | undefined
@@ -79,6 +80,8 @@ describe('mission control', () => {
     expect(field(await pane.drawn())?.props?.value ?? '').toBe('')
     await pane.press({ key: 'mc-edit-goal' })
     expect(field(await pane.drawn())?.props?.value).toBe('fix the crash when the password is empty')
+    await pane.press({ key: 'sec-options' })
+    expect(textOf(await pane.drawn())).toContain('● bug fix')
     await pane.press({ key: 'mc-profile-feature' })
     expect(textOf(await pane.drawn())).toContain('Specify the requirements and acceptance criteria')
     await pane.unmount()
@@ -159,6 +162,30 @@ describe('mission control', () => {
     await pane.unmount()
   })
 
+  test('an ask stays on the page that raised it: elsewhere it is one line with a way back, and the full confirm returns with the page', { options: { boot: false } }, async ($, on) => {
+    const { pane } = await opened($, on)
+
+    await pane.input({ key: 'mc-goal', text: 'add a dark mode toggle to settings', kind: 'submit' })
+    await pane.press({ key: 'mc-create' })
+    expect(textOf(await pane.drawn())).toContain('CONFIRM NEEDED')
+
+    // On another page: one line naming the page, a way there, and cancel; no Yes button to press by mistake.
+    await pane.press({ key: 'tab-swarm' })
+
+    const away = await pane.drawn()
+
+    expect(textOf(away)).toContain('An ask is waiting on Missions')
+    expect(textOf(away)).not.toContain('CONFIRM NEEDED')
+    expect(elementsOf(away, 'Button').map(keyOf)).toEqual(expect.arrayContaining(['confirm-go', 'cancel']))
+    expect(elementsOf(away, 'Button').map(keyOf)).not.toContain('confirm')
+
+    // The nav is grouped, one row per group of the main menu, and every page is a click away.
+    expect(textOf(away)).toMatch(/SWARM[\s\S]*MIND[\s\S]*SAFETY[\s\S]*NETWORK[\s\S]*TOOLS/)
+    await pane.press({ key: 'confirm-go' })
+    expect(textOf(await pane.drawn())).toContain('CONFIRM NEEDED')
+    await pane.unmount()
+  })
+
   test('guide Claude asks under its own field, keeps what was sent so ✎ edit can reload it, and ruflo-goals skills show as mission options with the unavailable ones marked', { options: { boot: false } }, async ($, on) => {
     const { world, pane, clock } = await opened($, on, RUFLO_FILES, { commands: ['ruflo-goals:goal-plan'] })
 
@@ -201,11 +228,12 @@ describe('mission control', () => {
     await $.command.run(command())
 
     const pane = await $.ui.mount({ ...paneAt(150), surface: 'terminal' as const, plugin: PLUGIN })
-    const menu = textOf(await pane.drawn())
+    const tree = await pane.drawn()
+    const menu = textOf(tree)
 
     expect(at(menu, 'MISSION CONTROL')).toBeGreaterThan(-1)
-    expect(at(menu, 'MISSION CONTROL')).toBeLessThan(at(menu, '▓▒░ SWARM ░▒▓'))
-    expect(at(menu, '(1)')).toBeLessThan(at(menu, '(2)'))
+    const entries = elementsOf(tree, 'Button').map(keyOf).filter(key => key.startsWith('menu-go-') && key !== 'menu-go-missions-top')
+    expect(entries.slice(0, 2)).toEqual(['menu-go-missions', 'menu-go-overview'])
     expect(elementsOf(await pane.drawn(), 'Input').map(keyOf)).toContain('menu-goal')
 
     await pane.input({ key: 'menu-goal', text: 'add a dark mode toggle to settings', kind: 'submit' })

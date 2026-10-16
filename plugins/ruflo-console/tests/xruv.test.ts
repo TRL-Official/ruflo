@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { RUFLO_FILES } from './fixtures/ruflo-run'
-import { cliAnswer, command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf, type Answer } from './fixtures/world'
+import { inputKeys, cliAnswer, command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf, type Answer } from './fixtures/world'
 
 const PUBKEY = 'ab'.repeat(32)
 const TOKEN = 'xr-admin-token-do-not-print-0123456789'
@@ -40,14 +40,15 @@ describe('x.ruv.io board', () => {
     const text = textOf(tree)
 
     expect(elementsOf(tree, 'Button').map(keyOf)).toEqual(expect.arrayContaining(['xr-x-join', 'xr-x-bbs-identity', 'xr-x-registry', 'xr-x-roster', 'xr-x-claims', 'xr-x-sync', 'xr-x-channels', 'xr-x-accept', 'xr-x-bbs-peers', 'xr-x-bbs-serve']))
-    expect(elementsOf(tree, 'Input').map(keyOf)).toEqual(expect.arrayContaining(['xr-in-x-bbs-register', 'xr-in-x-bbs-publish', 'xr-in-x-bbs-watch', 'xr-in-x-bbs-peer-add', 'xr-in-x-bbs-sync']))
-    expect(elementsOf(tree, 'Input').map(keyOf)).toEqual(expect.arrayContaining(['xr-in-x-join', 'xr-in-x-read', 'xr-in-x-publish', 'xr-in-x-create', 'xr-in-x-grant']))
+    expect(inputKeys(tree)).toEqual(expect.arrayContaining(['xr-in-x-bbs-register', 'xr-in-x-bbs-publish', 'xr-in-x-bbs-watch', 'xr-in-x-bbs-peer-add', 'xr-in-x-bbs-sync']))
+    expect(inputKeys(tree)).toEqual(expect.arrayContaining(['xr-in-x-join', 'xr-in-x-read', 'xr-in-x-publish', 'xr-in-x-create', 'xr-in-x-grant']))
     expect(text).toContain(' JOIN ....')
-    expect(text).toContain('present: ~/.ruflo/nostr.key (never read here)')
+    expect(text).not.toContain('present: ~/.ruflo/nostr.key')
     expect(text).toContain('unregister: not offered by the x.ruv.io gateway yet')
     expect(text).toContain('admin token: set it in the environment to enable')
     expect(text).toContain('Turn on federationNetwork in /config')
     expect(fedRuns(world.runs)).toEqual([])
+    expect(world.stats.some(path => path.endsWith('nostr.key'))).toBe(false)
     expect(world.reads.some(path => path.endsWith('nostr.key') || path.endsWith('channels.json'))).toBe(false)
     await pane.unmount()
   })

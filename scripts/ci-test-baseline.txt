@@ -14,6 +14,7 @@ plugins/ruflo-core/scripts/mcp-launch.test.cjs
 plugins/ruflo-mods/tests/cost.test.ts
 plugins/ruflo-mods/tests/noun.test.ts
 plugins/ruflo-mods/tests/register.test.ts
+plugins/ruflo-mods/tests/research.test.ts
 plugins/ruflo-mods/tests/trust.test.ts
 plugins/ruflo-plugin-creator/templates/mod/tests/register.test.ts
 plugins/ruflo-workflows/scripts/gaia-audit.test.mjs
@@ -132,6 +133,7 @@ plugins/ruflo-x-gateway/test/gateway.test.mjs
 plugins/ruflo-x-gateway/test/oauth.test.mjs
 plugins/ruflo-x-gateway/test/registration.test.mjs
 plugins/ruflo-x-gateway/test/claude-directory.test.mjs
+plugins/ruflo-x-gateway/test/github.test.mjs
 
 # ruflo-chatgpt-federation: same pattern — plugin-local deps (jose, nostr-tools/pure) not resolvable from root vitest
 plugins/ruflo-chatgpt-federation/test/oauth.test.mjs
@@ -173,9 +175,13 @@ plugins/ruflo-console/tests/watch.test.ts
 plugins/ruflo-console/tests/missions.test.ts
 plugins/ruflo-console/tests/settings.test.ts
 plugins/ruflo-console/tests/plugin-catalog.test.ts
+plugins/ruflo-console/tests/room-ux.test.ts
 plugins/ruflo-console/tests/sweep.test.ts
 plugins/ruflo-console/tests/devtools.test.ts
 plugins/ruflo-console/tests/evolve.test.ts
 plugins/ruflo-console/tests/vector.test.ts
 plugins/ruflo-console/tests/skills-secure.test.ts
 plugins/ruflo-console/tests/xruv.test.ts
+plugins/ruflo-console/tests/steps.test.ts
+plugins/ruflo-console/tests/nav.test.ts
+plugins/ruflo-console/tests/setup.test.ts

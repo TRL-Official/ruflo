@@ -3,7 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { settingsAnswer } from './fixtures/settings'
 import { RUFLO_FILES } from './fixtures/ruflo-run'
-import { command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
+import { inputKeys, command, elementsOf, keyOf, paneAt, PLUGIN, SESSION, textOf, worldOf } from './fixtures/world'
 
 type Body = Parameters<TestBody>
 
@@ -76,6 +76,31 @@ describe('settings', () => {
     await pane.unmount()
   })
 
+  test('ruflo-mods lists its tool hints, agent trim and delivery screen at the simple level, each with an honest note, and a toggle asks first', { options: { boot: false } }, async ($, on) => {
+    const { world, pane } = await opened($, on)
+
+    await pane.press({ key: 'st-plugin-ruflo-mods' })
+
+    const tree = await pane.drawn()
+    const text = textOf(tree)
+
+    expect(text).toContain('Hide unused agent types')
+    expect(text).toContain('about 4,000 fewer prompt tokens measured')
+    expect(text).toContain('Screen peer deliveries and outgoing messages')
+    expect(text).toContain('real-world rate unknown')
+    expect(text).toContain('Usage hints on ruflo tools')
+    expect(elementsOf(tree, 'Button').map(keyOf)).toEqual(expect.arrayContaining(['st-ask-claude-ruflo-mods-agentTrim', 'st-ask-codex-ruflo-mods-deliveryScreen', 'st-opt-ruflo-mods-agentTrim-true']))
+    await pane.press({ key: 'st-opt-ruflo-mods-agentTrim-true' })
+
+    const asked = textOf(await pane.drawn())
+
+    expect(asked).toContain('Confirm: set ruflo-mods agentTrim to true')
+    expect(asked).toContain('{"agentTrim":"true"}')
+    expect(claudeRuns(world.runs).filter(argv => argv.includes('--values-stdin'))).toEqual([])
+    await $.command.run(command('no'))
+    await pane.unmount()
+  })
+
   test('a number field takes digits only; ruflo config keys outside the list or out of range are refused', { options: { boot: false } }, async ($, on) => {
     const { world, pane } = await opened($, on)
 
@@ -112,7 +137,7 @@ describe('settings', () => {
     expect(text).toContain('Relay token')
     expect(text).toContain('hidden: set it in /plugin configure')
     expect(text).not.toContain('sk-must-never-show')
-    expect(elementsOf(tree, 'Input').map(keyOf)).not.toContain('st-in-ruflo-mods-relayApiToken')
+    expect(inputKeys(tree)).not.toContain('st-in-ruflo-mods-relayApiToken')
     expect(elementsOf(tree, 'Button').map(keyOf).some(key => key.startsWith('st-ask-claude-ruflo-mods-relayApiToken'))).toBe(false)
     await pane.unmount()
   })
@@ -228,22 +253,23 @@ describe('settings', () => {
   })
 
 
-  test('the main nav has a title and three styles: icons only, icon and brief title, icon and full title', { options: { boot: false } }, async ($, on) => {
-    const { pane } = await opened($, on, 'swarm')
-    const text = async () => textOf(await pane.drawn())
+  test('the nav style is a Settings choice: icons only, icon and brief title, icon and full title; the nav page row follows it', { options: { boot: false } }, async ($, on) => {
+    const { pane } = await opened($, on, 'settings')
+    const keysNow = async () => elementsOf(await pane.drawn(), 'Button').map(keyOf)
 
-    expect(await text()).toContain('NAV')
-    expect(elementsOf(await pane.drawn(), 'Button').map(keyOf)).toEqual(expect.arrayContaining(['nav-style-auto', 'nav-style-icons', 'nav-style-brief', 'nav-style-full']))
-
-    await pane.press({ key: 'nav-style-icons' })
-    expect(await text()).not.toContain('Hive')
-
-    await pane.press({ key: 'nav-style-brief' })
-    expect(await text()).toContain('Hiv')
-    expect(await text()).not.toContain('Hive-Mind')
-
-    await pane.press({ key: 'nav-style-full' })
-    expect(await text()).toContain('Hive-Mind')
+    expect(await keysNow()).toEqual(expect.arrayContaining(['st-opt-ui-nav-auto', 'st-opt-ui-nav-icons', 'st-opt-ui-nav-brief', 'st-opt-ui-nav-full']))
+    await pane.press({ key: 'st-opt-ui-nav-icons' })
+    await $.command.run(command('swarm'))
+    expect(textOf(await pane.drawn())).not.toContain('Hive')
+    await $.command.run(command('settings'))
+    await pane.press({ key: 'st-opt-ui-nav-brief' })
+    await $.command.run(command('swarm'))
+    expect(textOf(await pane.drawn())).toContain('Hiv')
+    expect(textOf(await pane.drawn())).not.toContain('Hive-Mind')
+    await $.command.run(command('settings'))
+    await pane.press({ key: 'st-opt-ui-nav-full' })
+    await $.command.run(command('swarm'))
+    expect(textOf(await pane.drawn())).toContain('Hive-Mind')
     await pane.unmount()
   })
 

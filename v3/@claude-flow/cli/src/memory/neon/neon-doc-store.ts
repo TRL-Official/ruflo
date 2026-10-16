@@ -52,35 +52,60 @@ function makeCaller(): (stmts: Stmt[]) => Row[][] {
   };
 }
 
-export interface DocStoreOptions { store: string; keyed?: string[]; lazy?: string[]; window?: number }
+/** keyed: top-level objects stored one row per sub-key; '*' = every top-level object whose values are all objects. */
+export interface DocStoreOptions { store: string; keyed?: string[] | '*'; lazy?: string[]; window?: number }
+
+// One worker per process, shared by every store opened in it.
+let sharedCall: ((stmts: Stmt[]) => Row[][]) | null = null;
 
 export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocStoreOptions) {
   const schema = process.env.RVN_SCHEMA || 'rvdirect';
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error(`neon-doc-store: bad schema name ${schema}`);
   const T = `${schema}.rec`;
-  const KEYED = new Set(keyed);
+  const AUTO = keyed === '*';
+  const KEYED = new Set<string>(AUTO ? [] : (keyed as string[]));
+  const isKeyed = (key: string, val: any) => (KEYED.has(key) && val && typeof val === 'object') || (AUTO && val && typeof val === 'object'
+    && !Array.isArray(val) && Object.keys(val).length > 0 && Object.values(val).every((v) => v && typeof v === 'object'));
   const LAZY = [...lazy];
   const DIM = Number(process.env.RVN_DIM) || 384;
   const WINDOW = Number(process.env.RVN_WINDOW ?? window) || 0;
-  const call = makeCaller();
+  const call = (sharedCall ??= makeCaller());
   let snapshot = new Map<string, string>(); // `${coll}\0${rid}` → JSON of the body as loaded/saved
   const stats = { loads: 0, saves: 0, upserts: 0, deletes: 0, ms: 0 };
+
+  let uidN = 0;
+  const uid = () => `${process.pid.toString(36)}${Date.now().toString(36)}${(uidN++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
   function toRows(doc: Doc) {
     const rows: { coll: string; rid: string; body: any }[] = [];
     for (const [key, val] of Object.entries(doc)) {
       if (val === undefined) continue;
       if (Array.isArray(val)) {
+        // Elements without an id are identified by content. One this process LOADED keeps its row id;
+        // a NEW one gets a fresh unique id, so two sessions appending identical-looking entries both keep theirs.
+        const avail = new Map<string, string[]>();
+        for (const k of snapshot.keys()) {
+          const [c, r] = k.split('\u0000');
+          if (c !== key || !r.startsWith('h:')) continue;
+          const h = r.slice(2, 22); (avail.get(h) || avail.set(h, []).get(h)!).push(r);
+        }
         const seen = new Map<string, number>();
         for (const el of val) {
-          // Real stores repeat ids, so a repeat gets #n: both copies are kept.
-          const base = el && typeof el === 'object' && (typeof el.id === 'string' || typeof el.id === 'number')
-            ? `id:${el.id}` : `h:${createHash('sha1').update(JSON.stringify(el)).digest('hex').slice(0, 20)}`;
-          const n = (seen.get(base) || 0) + 1; seen.set(base, n);
-          rows.push({ coll: key, rid: n === 1 ? base : `${base}#${n}`, body: el });
+          let rid: string;
+          if (el && typeof el === 'object' && (typeof el.id === 'string' || typeof el.id === 'number')) {
+            // Real stores repeat ids, so a repeat gets #n: both copies are kept.
+            const base = `id:${el.id}`;
+            const n = (seen.get(base) || 0) + 1; seen.set(base, n);
+            rid = n === 1 ? base : `${base}#${n}`;
+          } else {
+            const h = createHash('sha1').update(JSON.stringify(el)).digest('hex').slice(0, 20);
+            const mine = avail.get(h);
+            rid = mine && mine.length ? mine.shift()! : `h:${h}~${uid()}`;
+          }
+          rows.push({ coll: key, rid, body: el });
         }
         if (val.length === 0) rows.push({ coll: '_doc', rid: `[]${key}`, body: [] }); // keep empty arrays
-      } else if (KEYED.has(key) && val && typeof val === 'object') {
+      } else if (isKeyed(key, val)) {
         for (const [k, v] of Object.entries(val)) if (v !== undefined) rows.push({ coll: key, rid: `k:${k}`, body: v });
         if (Object.keys(val).length === 0) rows.push({ coll: '_doc', rid: `{}${key}`, body: {} });
       } else {
@@ -107,7 +132,8 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     }
   }
 
-  function load(): Doc | null {
+  /** Read the document; also records what this process has SEEN unless peek (a stat must not widen later deletes). */
+  function load({ peek = false }: { peek?: boolean } = {}): Doc | null {
     const t = Date.now();
     const [rows] = withTable(() => call([{ text: `SELECT coll, rid, body FROM (
                SELECT coll, rid, body, seq FROM ${T} WHERE store = $1 AND NOT (coll = ANY($2::text[]))
@@ -116,11 +142,12 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
                  WHERE store = $1 AND coll = ANY($2::text[]) ORDER BY seq DESC LIMIT $3) w
              ) d ORDER BY seq`, params: [store, LAZY, WINDOW] }]));
     stats.loads++; stats.ms += Date.now() - t;
-    snapshot = new Map();
+    const seenRows = new Map<string, string>();
+    if (!peek) snapshot = seenRows;
     if (!rows.length) return null;
     const doc: Doc = {};
     for (const { coll, rid, body } of rows) {
-      snapshot.set(`${coll}\u0000${rid}`, JSON.stringify(body));
+      seenRows.set(`${coll}\u0000${rid}`, JSON.stringify(body));
       if (coll === '_doc') {
         if (rid.startsWith('[]')) { doc[rid.slice(2)] ??= []; continue; }
         if (rid.startsWith('{}')) { doc[rid.slice(2)] ??= {}; continue; }
@@ -230,7 +257,12 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     clear: (coll: string) => withTable(() => call([{ text: `DELETE FROM ${T} WHERE store = $1 AND coll = $2`, params: [store, coll] }])),
   };
 
-  return { load, save, search, rows, stats, query: (text: string, params?: unknown[]) => withTable(() => call([{ text, params }])[0]) };
+  /** Remove the whole store (a deleted file). */
+  function drop(): void { withTable(() => call([{ text: `DELETE FROM ${T} WHERE store = $1`, params: [store] }])); snapshot = new Map(); }
+  /** Does the store hold anything? One indexed lookup. */
+  function exists(): boolean { return withTable(() => call([{ text: `SELECT 1 FROM ${T} WHERE store = $1 LIMIT 1`, params: [store] }]))[0].length > 0; }
+
+  return { load, save, search, rows, drop, exists, stats, query: (text: string, params?: unknown[]) => withTable(() => call([{ text, params }])[0]) };
 }
 
 export type DocStore = ReturnType<typeof openDocStore>;

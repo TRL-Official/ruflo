@@ -33,10 +33,10 @@ function statePath(rel: string): string {
 }
 
 /** Maximum entries kept in state.history (prevents unbounded growth) */
-const MAX_HISTORY_ENTRIES = 50;
+const MAX_HISTORY_ENTRIES = (Number(process.env.RUFLO_AUTOPILOT_HISTORY_MAX) || Infinity); /* [uncap] */
 
 /** Maximum entries kept in the event log */
-const MAX_LOG_ENTRIES = 1000;
+const MAX_LOG_ENTRIES = (Number(process.env.RUFLO_AUTOPILOT_LOG_MAX) || Infinity); /* [uncap] */
 
 /** Allowlist for valid task sources */
 export const VALID_TASK_SOURCES = new Set(['team-tasks', 'swarm-tasks', 'file-checklist']);

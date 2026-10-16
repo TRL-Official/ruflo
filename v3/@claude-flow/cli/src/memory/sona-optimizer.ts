@@ -128,7 +128,7 @@ const MAX_CONFIDENCE = 0.99;
 const CONFIDENCE_INCREMENT = 0.1;
 const CONFIDENCE_DECREMENT = 0.15;
 const DECAY_RATE = 0.01; // Per day
-const MAX_PATTERNS = 1000;
+const MAX_PATTERNS = (Number(process.env.RUFLO_SONA_MAX_PATTERNS) || Infinity); /* [uncap] */
 /** #4134: a trajectory reinforces an existing pattern of the same agent whose keyword set overlaps at least this much (Jaccard). */
 const NEIGHBOUR_MIN_JACCARD = 0.6;
 /** The routing gate in getRoutingSuggestion: confidence x matchRatio must reach this for a learned pattern to be used. */
@@ -580,7 +580,7 @@ export class SONAOptimizer {
         const decay = Math.exp(-DECAY_RATE * daysSinceUse);
         const newConfidence = pattern.confidence * decay;
 
-        if (newConfidence < MIN_CONFIDENCE) {
+        if (process.env.RUFLO_SONA_DECAY_DELETE === '1' && newConfidence < MIN_CONFIDENCE) { /* [uncap] */ // otherwise keep it, decayed
           // Remove patterns with very low confidence
           this.patterns.delete(key);
         } else {

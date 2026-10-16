@@ -741,8 +741,8 @@ export const coordinationTools: MCPTool[] = [
       const orchStore = store as CoordStoreShape;
       if (!Array.isArray(orchStore.orchestrations)) orchStore.orchestrations = [];
       orchStore.orchestrations.push(orchestration);
-      if (orchStore.orchestrations.length > 100) {
-        orchStore.orchestrations = orchStore.orchestrations.slice(-100);
+      if (orchStore.orchestrations.length > (Number(process.env.RUFLO_ORCHESTRATIONS_MAX) || Infinity)) { /* [uncap] */
+        orchStore.orchestrations = orchStore.orchestrations.slice(-(Number(process.env.RUFLO_ORCHESTRATIONS_MAX) || Infinity));
       }
       saveCoordStore(orchStore);
 

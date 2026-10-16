@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 export const LEDGER_FILE = 'harness-improvement.jsonl';
-const MAX_ENTRIES = 5000; // rotation cap (keeps the most-recent tail)
+const MAX_ENTRIES = (Number(process.env.RUFLO_HARNESS_LEDGER_MAX) || Infinity); /* [uncap] */ // rotation cap (keeps the most-recent tail)
 
 export interface LedgerEntry {
   ts: number;

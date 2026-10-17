@@ -1135,7 +1135,12 @@ export async function initializeIntelligence(config?: Partial<SonaConfig>): Prom
 
     // Initialize local ReasoningBank with persistence enabled
     // RUFLO_STORE=neon keeps the patterns in Neon (./neon/neon-reasoning-bank.ts), not patterns.json.
-    reasoningBank = new (process.env.RUFLO_STORE === 'neon' ? NeonReasoningBank : LocalReasoningBank)({
+    // RUFLO_NEON_BANK_MODULE: a NeonReasoningBank module to use instead of the bundled one (digital-twin's
+    // install.sh points it at its live neon-reasoning-bank.cjs, which talks to the connection holder).
+    const NeonBank = process.env.RUFLO_NEON_BANK_MODULE
+      ? createRequire(import.meta.url)(process.env.RUFLO_NEON_BANK_MODULE).NeonReasoningBank as typeof NeonReasoningBank
+      : NeonReasoningBank;
+    reasoningBank = new (process.env.RUFLO_STORE === 'neon' ? NeonBank : LocalReasoningBank)({
       maxSize: finalConfig.maxPatterns,
       persistence: true
     });

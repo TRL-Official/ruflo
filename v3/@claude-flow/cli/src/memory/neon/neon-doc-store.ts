@@ -24,25 +24,32 @@
  */
 import { Worker, MessageChannel, receiveMessageOnPort } from 'node:worker_threads';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Row = any;
 interface Stmt { text: string; params?: unknown[] }
 type Doc = Record<string, any>;
 
-function makeCaller(): (stmts: Stmt[]) => Row[][] {
+interface LoadCache { key: string; store: string; table: string; lazy: string[] }
+type Caller = (stmts: Stmt[], cache?: LoadCache) => Row[][];
+
+function makeCaller(): Caller {
   const url = process.env.RVN_URL || process.env.PGSYNC_URL;
   if (!url) throw new Error('neon-doc-store: RVN_URL / PGSYNC_URL is not set — refusing to fall back to a file');
   const driver = process.env.PGSYNC_NEON_DRIVER || '@neondatabase/serverless';
   const timeout = Number(process.env.RVN_TIMEOUT_MS) || 20000;
   // The worker inherits the host's execArgv; --input-type (node -e hosts) is refused for a file worker.
   const execArgv = process.execArgv.filter((a) => !a.startsWith('--input-type'));
-  const worker = new Worker(new URL('./neon-doc-worker.js', import.meta.url), { workerData: { url, driver }, execArgv });
+  // the connection holder (digital-twin's neon-holder.mjs), when its socket exists; otherwise Neon directly
+  const holder = process.env.NEON_HOLDER_SOCK;
+  const sock = holder && existsSync(holder) ? holder : null;
+  const worker = new Worker(new URL('./neon-doc-worker.js', import.meta.url), { workerData: { url, driver, sock }, execArgv });
   worker.unref(); // never keep a CLI process alive
-  return function call(stmts: Stmt[]): Row[][] {
+  return function call(stmts: Stmt[], cache?: LoadCache): Row[][] {
     const sab = new SharedArrayBuffer(4);
     const { port1, port2 } = new MessageChannel();
-    worker.postMessage({ stmts, sab, port: port2 }, [port2]);
+    worker.postMessage({ stmts, cache, sab, port: port2 }, [port2]);
     const r = Atomics.wait(new Int32Array(sab), 0, 0, timeout);
     const msg = receiveMessageOnPort(port1);
     port1.close();
@@ -56,7 +63,7 @@ function makeCaller(): (stmts: Stmt[]) => Row[][] {
 export interface DocStoreOptions { store: string; keyed?: string[] | '*'; lazy?: string[]; window?: number }
 
 // One worker per process, shared by every store opened in it.
-let sharedCall: ((stmts: Stmt[]) => Row[][]) | null = null;
+let sharedCall: Caller | null = null;
 
 export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocStoreOptions) {
   const schema = process.env.RVN_SCHEMA || 'rvdirect';
@@ -71,6 +78,11 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   const WINDOW = Number(process.env.RVN_WINDOW ?? window) || 0;
   const call = (sharedCall ??= makeCaller());
   let snapshot = new Map<string, string>(); // `${coll}\0${rid}` → JSON of the body as loaded/saved
+  // Row ids of lazy-collection elements, by object identity: an element this process loaded or saved keeps
+  // its row; a NEW element always gets a row of its own. Ids alone cannot decide it — ruvector names
+  // trajectories traj_<seconds>, so two hooks in one second share an id, and with the collection not loaded
+  // the second would overwrite the first row. (Ported from digital-twin's neon-doc-store.cjs, 2026-10-17.)
+  const lazyRid = new WeakMap<object, string>();
   const stats = { loads: 0, saves: 0, upserts: 0, deletes: 0, ms: 0 };
 
   let uidN = 0;
@@ -80,7 +92,22 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     const rows: { coll: string; rid: string; body: any }[] = [];
     for (const [key, val] of Object.entries(doc)) {
       if (val === undefined) continue;
-      if (Array.isArray(val)) {
+      if (Array.isArray(val) && LAZY.includes(key)) {
+        const used = new Set<string>();
+        for (const el of val) {
+          const obj = el && typeof el === 'object';
+          let rid = obj ? lazyRid.get(el) : undefined;
+          if (!rid || used.has(rid)) {
+            const base = obj && (typeof el.id === 'string' || typeof el.id === 'number') ? `id:${el.id}`
+              : `h:${createHash('sha1').update(JSON.stringify(el)).digest('hex').slice(0, 20)}`;
+            rid = `${base}~${uid()}`;
+            if (obj) lazyRid.set(el, rid);
+          }
+          used.add(rid);
+          rows.push({ coll: key, rid, body: el });
+        }
+        if (val.length === 0) rows.push({ coll: '_doc', rid: `[]${key}`, body: [] });
+      } else if (Array.isArray(val)) {
         // Elements without an id are identified by content. One this process LOADED keeps its row id;
         // a NEW one gets a fresh unique id, so two sessions appending identical-looking entries both keep theirs.
         const avail = new Map<string, string[]>();
@@ -121,6 +148,14 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
                seq bigserial, ver int NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now(),
                vec vector(${DIM}), PRIMARY KEY (store, coll, rid))` },
     { text: `CREATE INDEX IF NOT EXISTS rec_vec_hnsw ON ${T} USING hnsw (vec vector_cosine_ops)` },
+    // NOTHING IS EVER LOST: every deleted row — by any tool, any session — is copied here first, by Postgres.
+    { text: `CREATE TABLE IF NOT EXISTS ${schema}.rec_deleted (store text NOT NULL, coll text NOT NULL, rid text NOT NULL, body jsonb,
+               vec vector(${DIM}), seq bigint, ver int, deleted_at timestamptz NOT NULL DEFAULT now())` },
+    { text: `CREATE INDEX IF NOT EXISTS rec_deleted_store ON ${schema}.rec_deleted (store, coll)` },
+    { text: `CREATE OR REPLACE FUNCTION ${schema}.rec_keep_deleted() RETURNS trigger LANGUAGE plpgsql AS $f$
+               BEGIN INSERT INTO ${schema}.rec_deleted (store, coll, rid, body, vec, seq, ver) VALUES (OLD.store, OLD.coll, OLD.rid, OLD.body, OLD.vec, OLD.seq, OLD.ver);
+               RETURN OLD; END $f$` },
+    { text: `CREATE OR REPLACE TRIGGER rec_keep_deleted BEFORE DELETE ON ${T} FOR EACH ROW EXECUTE FUNCTION ${schema}.rec_keep_deleted()` },
   ];
   // DDL only when the table is missing: CREATE INDEX IF NOT EXISTS still locks the table.
   function withTable<R>(fn: () => R): R {
@@ -135,12 +170,15 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   /** Read the document; also records what this process has SEEN unless peek (a stat must not widen later deletes). */
   function load({ peek = false }: { peek?: boolean } = {}): Doc | null {
     const t = Date.now();
+    // the holder may answer from memory when the store's fingerprint is unchanged; a window of lazy rows
+    // changes with every append, so only window-less loads are cached
+    const cache: LoadCache | undefined = WINDOW ? undefined : { key: `${schema}\u0000${store}\u0000${LAZY.join(',')}`, store, table: T, lazy: LAZY };
     const [rows] = withTable(() => call([{ text: `SELECT coll, rid, body FROM (
                SELECT coll, rid, body, seq FROM ${T} WHERE store = $1 AND NOT (coll = ANY($2::text[]))
                UNION ALL
                SELECT coll, rid, body, seq FROM (SELECT coll, rid, body, seq FROM ${T}
                  WHERE store = $1 AND coll = ANY($2::text[]) ORDER BY seq DESC LIMIT $3) w
-             ) d ORDER BY seq`, params: [store, LAZY, WINDOW] }]));
+             ) d ORDER BY seq`, params: [store, LAZY, WINDOW] }], cache));
     stats.loads++; stats.ms += Date.now() - t;
     const seenRows = new Map<string, string>();
     if (!peek) snapshot = seenRows;
@@ -156,6 +194,7 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
         (doc[coll] ??= {})[rid.slice(2)] = body;
       } else {
         (doc[coll] ??= []).push(body);
+        if (LAZY.includes(coll) && body && typeof body === 'object') lazyRid.set(body, rid);
       }
     }
     return doc;
@@ -265,7 +304,9 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   /** Does the store hold anything? One indexed lookup. */
   function exists(): boolean { return withTable(() => call([{ text: `SELECT 1 FROM ${T} WHERE store = $1 LIMIT 1`, params: [store] }]))[0].length > 0; }
 
-  return { load, save, search, rows, drop, exists, stats, query: (text: string, params?: unknown[]) => withTable(() => call([{ text, params }])[0]) };
+  /** The full DDL, idempotent — for a store table created before the deleted-rows archive. */
+  function ensure(): void { call(DDL); }
+  return { load, save, search, rows, drop, exists, ensure, stats, query: (text: string, params?: unknown[]) => withTable(() => call([{ text, params }])[0]) };
 }
 
 export type DocStore = ReturnType<typeof openDocStore>;

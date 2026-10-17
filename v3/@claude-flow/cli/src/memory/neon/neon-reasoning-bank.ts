@@ -22,6 +22,20 @@ import { openDocStore, type DocStore } from './neon-doc-store.js';
 type Pattern = any;
 
 const COLL = 'patterns';
+
+/** An Array (Array.isArray is true) whose contents are fetched on first access. */
+function lazyList<T>(fetch: () => T[]): T[] {
+  let arr: T[] | null = null;
+  const load = () => (arr ??= fetch());
+  return new Proxy([] as T[], {
+    get(_, p) { const a = load(); const v = Reflect.get(a, p, a); return typeof v === 'function' ? v.bind(a) : v; },
+    set(_, p, v) { return Reflect.set(load(), p, v); },
+    has(_, p) { return Reflect.has(load(), p); },
+    ownKeys() { return Reflect.ownKeys(load()); },
+    getOwnPropertyDescriptor(_, p) { const d = Reflect.getOwnPropertyDescriptor(load(), p); if (d && p !== 'length') d.configurable = true; return d; },
+    deleteProperty(_, p) { return Reflect.deleteProperty(load(), p); },
+  });
+}
 const rid = (id: string) => `id:${id}`;
 
 export class NeonReasoningBank {
@@ -131,14 +145,17 @@ export class NeonReasoningBank {
     return { size: n, patternCount: n };
   }
 
+  // The whole bank is ~37 MB at 4,300 patterns (embeddings included) — ~20 s over the network. ruflo's
+  // endTrajectory() calls getAll() and never uses the result, on every post-task. So the list is LAZY:
+  // an array that fetches on first real use (length, an index, map, iteration) and is otherwise free.
   getAll(): Pattern[] {
     this.flushToDisk();
-    return this.db.rows.all(COLL).map((b) => this.adopt(b));
+    return lazyList(() => this.db.rows.all(COLL).map((b) => this.adopt(b)));
   }
 
   getByType(type: string): Pattern[] {
     this.flushToDisk();
-    return this.db.rows.all(COLL, { type }).map((b) => this.adopt(b));
+    return lazyList(() => this.db.rows.all(COLL, { type }).map((b) => this.adopt(b)));
   }
 
   delete(id: string): boolean {

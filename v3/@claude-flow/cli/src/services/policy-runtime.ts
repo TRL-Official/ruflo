@@ -60,6 +60,17 @@ const STATE_ANCHOR_FILE = 'state.anchor.json';
 // [neon-direct] tunable, default 120 s: with the policy state in Neon a 5 s wait failed concurrent appends; a dead
 // holder is still detected by its owner's liveness (lockOwnerIsDead), not by this wait
 const LOCK_WAIT_MS = Number(process.env.RUFLO_POLICY_LOCK_WAIT_MS) || 120_000; /* [uncap] */
+// [neon-direct] ruflo 3.57.0 takes over a lock only when its owner is proven dead on this host, boot and pid
+// namespace. With the policy state in Neon the lock is one row shared by every container, and a container is
+// reclaimed without warning, so a lock left by another container could never be taken over: every ruflo command
+// in every session would wait LOCK_WAIT_MS and fail. RUFLO_POLICY_LOCK_STALE_MS (neon-env.sh sets it) restores the
+// age rule of ruflo < 3.57.0 for such a lock and for an orphaned reclaim guard; the age is Neon's clock. Unset
+// (plain ruflo): upstream behaviour, unchanged.
+const LOCK_STALE_MS = Number(process.env.RUFLO_POLICY_LOCK_STALE_MS) || 0; /* [neon-direct] */
+function lockAgedOut(lockPath: string): boolean { /* [neon-direct] */
+  if (!LOCK_STALE_MS) return false;
+  try { return Date.now() - lstatSync(lockPath).mtimeMs > LOCK_STALE_MS; } catch { return false; }
+}
 // #3164: without a bound, `state.receipts` grows forever and every
 // transaction's verify/clone/serialize cost is O(all receipts ever issued) —
 // eventually exceeding LOCK_WAIT_MS and timing out every MCP tool call.
@@ -146,6 +157,10 @@ function readLockFile(lockPath: string): string | undefined {
  * explicit operator inspection rather than age-only takeover.
  */
 function lockOwnerIsDead(lockPath: string): boolean {
+  if (lockAgedOut(lockPath)) { /* [neon-direct] an aged lock that has not changed hands meanwhile */
+    try { const read = readLockFile(lockPath); if (read !== undefined && lockAgedOut(lockPath) && readLockFile(lockPath) === read) return true; }
+    catch { /* fall through to the identity rule */ }
+  }
   try {
     const read = readLockFile(lockPath);
     if (read === undefined) return false;
@@ -180,7 +195,12 @@ function lockOwnerIsDead(lockPath: string): boolean {
 function reclaimDeadLock(lockPath: string): void {
   const guard = `${lockPath}.reclaim`;
   let fd: number;
-  try { fd = openSync(guard, 'wx', 0o600); } catch { return; }
+  try { fd = openSync(guard, 'wx', 0o600); }
+  catch {
+    // [neon-direct] a guard orphaned by a killed process would stop every reclaim for good
+    if (lockAgedOut(guard)) { try { unlinkSync(guard); } catch { /* another reclaimer removed it */ } }
+    return;
+  }
   const ownership = JSON.stringify({ pid: process.pid, nonce: randomUUID(), host: hostname(), platform: process.platform, pidns: PID_NAMESPACE, boot: BOOT_ID });
   try {
     writeFileSync(fd, ownership);

@@ -77,7 +77,10 @@ export class NeonReasoningBank {
     }
     if (!up.length && !this.deleted.size) return;
     try {
-      this.db.rows.write(COLL, up.map((u) => ({ rid: u.rid, body: u.body })), [...this.deleted].map(rid));
+      // checked writes (2026-10-18): `base` = the pattern's JSON when it was read (null = new), so a pattern another
+      // process updated meanwhile is merged (counters add) instead of overwritten; a delete loses to such an update
+      this.db.rows.write(COLL, up.map((u) => ({ rid: u.rid, body: u.body, base: this.orig.has(u.id) ? this.orig.get(u.id)! : null })),
+        [...this.deleted].map((id) => (this.orig.has(id) ? { rid: rid(id), base: this.orig.get(id)! } : rid(id))));
       for (const u of up) this.orig.set(u.id, u.j);
       this.deleted.clear();
       if (Number.isFinite(this.maxSize)) this.db.rows.retain(COLL, this.maxSize);

@@ -22,8 +22,15 @@
  *
  * It never falls back to a file: without Neon it throws, and the caller decides.
  *
+ * Embeddings kept once (ported from digital-twin, 2026-10-19): a lazy record's embedding is copied into `vec` for
+ * search. With RVN_EMBED_IN_VEC=1 the copy in `body` becomes the marker "rvdirect:vec" — only when Postgres confirms
+ * `vec` gives back exactly the same numbers. Every read rebuilds it from `vec` (REB) with extra_float_digits pinned
+ * to 1 (at 0 the rebuild is not exact). A marker without `vec` is refused by the database (constraint rec_vec_mark)
+ * and never handed on (EMB_OK).
+ *
  * Env: RVN_URL (else PGSYNC_URL), RVN_SCHEMA (default rvdirect), PGSYNC_NEON_DRIVER (default
- * '@neondatabase/serverless'), RVN_TIMEOUT_MS (20000), RVN_DIM (384), RVN_WINDOW (0), RVN_CHUNK_BYTES.
+ * '@neondatabase/serverless'), RVN_TIMEOUT_MS (20000), RVN_DIM (384), RVN_WINDOW (0), RVN_CHUNK_BYTES,
+ * RVN_EMBED_IN_VEC (1 = strip on write; default off).
  * The same table layout as the ruvector fork's bin/neon-doc-store.cjs, so the two can share a schema.
  */
 import { Worker, MessageChannel, receiveMessageOnPort } from 'node:worker_threads';
@@ -108,6 +115,22 @@ export function merge3(base: any, ours: any, theirs: any): any {
 // One worker per process, shared by every store opened in it.
 let sharedCall: Caller | null = null;
 
+// --- embeddings kept once (see the header) ---
+const MARK = 'rvdirect:vec';
+// the body as written, with the embedding rebuilt from vec when it was stripped. `a` = the table alias.
+// Exact only with extra_float_digits >= 1 in the same transaction: every statement list using it starts with PIN.
+const REB = (a: string): string => `CASE WHEN ${a}.body->>'embedding' = '${MARK}' AND ${a}.vec IS NOT NULL
+  THEN jsonb_set(${a}.body, '{embedding}', to_jsonb(${a}.vec::real[]::float8[])) ELSE ${a}.body END`;
+const PIN: Stmt = { text: 'SET LOCAL extra_float_digits = 1' };
+// a read must never hand the marker on: it means vec was lost, and callers would take a string for a vector
+function EMB_OK(body: any, where: string): any {
+  if (body && typeof body === 'object' && body.embedding === MARK) {
+    const e = new Error(`neon-doc-store: ${where} holds the embedding marker but no vector — refusing to return it`);
+    recordAlert('doc-store', e); throw e;
+  }
+  return body;
+}
+
 export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocStoreOptions) {
   const schema = process.env.RVN_SCHEMA || 'rvdirect';
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error(`neon-doc-store: bad schema name ${schema}`);
@@ -120,6 +143,9 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   const DIM = Number(process.env.RVN_DIM) || 384;
   const WINDOW = Number(process.env.RVN_WINDOW ?? window) || 0;
   const call = (sharedCall ??= makeCaller());
+  // statements whose SQL uses REB: run after PIN, in one transaction; the PIN's own result is dropped
+  const callPinned = (stmts: Stmt[]): Row[][] => call([PIN, ...stmts]).slice(1);
+  const STRIP = process.env.RVN_EMBED_IN_VEC === '1';
   let snapshot = new Map<string, string>(); // `${coll}\0${rid}` → JSON of the body as loaded/saved
   // Row ids of lazy-collection elements, by object identity: an element this process loaded or saved keeps
   // its row; a NEW element always gets a row of its own. Ids alone cannot decide it — ruvector names
@@ -197,6 +223,9 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
                seq bigserial, ver int NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now(),
                vec vector(${DIM}), PRIMARY KEY (store, coll, rid))` },
     { text: `CREATE INDEX IF NOT EXISTS rec_vec_hnsw ON ${T} USING hnsw (vec vector_cosine_ops)` },
+    // a stripped embedding (the marker) is only ever stored together with its vector
+    { text: `DO $c$ BEGIN ALTER TABLE ${T} ADD CONSTRAINT rec_vec_mark CHECK (body->>'embedding' IS DISTINCT FROM '${MARK}' OR vec IS NOT NULL);
+               EXCEPTION WHEN duplicate_object THEN NULL; END $c$` },
     // NOTHING IS EVER LOST: every deleted row — by any tool, any session — is copied here first, by Postgres.
     { text: `CREATE TABLE IF NOT EXISTS ${schema}.rec_deleted (store text NOT NULL, coll text NOT NULL, rid text NOT NULL, body jsonb,
                vec vector(${DIM}), seq bigint, ver int, deleted_at timestamptz NOT NULL DEFAULT now())` },
@@ -243,14 +272,16 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     }
     if (!rows) {
       // the holder may answer from memory when the store's fingerprint is unchanged; a window of lazy rows
-      // changes with every append, so only window-less loads are cached
+      // changes with every append, so only window-less loads are cached. A window-less load holds no lazy rows
+      // (LIMIT 0), so it needs no PIN; lazy rows (the window) may carry a stripped embedding: REB, pinned.
       const cache: LoadCache | undefined = WINDOW ? undefined : { key: `${schema}\u0000${store}\u0000${LAZY.join(',')}`, store, table: T, lazy: LAZY };
-      [rows] = withTable(() => call([{ text: `SELECT coll, rid, body, seq, ver FROM (
+      const SELECT: Stmt[] = [{ text: `SELECT coll, rid, body, seq, ver FROM (
                  SELECT coll, rid, body, seq, ver FROM ${T} WHERE store = $1 AND NOT (coll = ANY($2::text[]))
                  UNION ALL
-                 SELECT coll, rid, body, seq, ver FROM (SELECT coll, rid, body, seq, ver FROM ${T}
+                 SELECT coll, rid, body, seq, ver FROM (SELECT coll, rid, ${REB('l')} AS body, seq, ver FROM ${T} l
                    WHERE store = $1 AND coll = ANY($2::text[]) ORDER BY seq DESC LIMIT $3) w
-               ) d ORDER BY seq`, params: [store, LAZY, WINDOW] }], cache));
+               ) d ORDER BY seq`, params: [store, LAZY, WINDOW] }];
+      [rows] = withTable(() => (cache ? call(SELECT, cache) : callPinned(SELECT)));
       fresh = true;
     }
     stats.loads++; stats.ms += Date.now() - t;
@@ -261,6 +292,7 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     const keep: { coll: string; rid: string; j: string }[] | null = fresh && MEMO ? [] : null;
     const fp = keep && fpOf(rows!);
     for (const { coll, rid, body, j: j0 } of rows!) {
+      EMB_OK(body, `${store} ${coll}/${rid}`);
       const j: string = j0 ?? JSON.stringify(body);
       seenRows.set(`${coll}\u0000${rid}`, j);
       if (keep && fp) keep.push({ coll, rid, j });
@@ -288,6 +320,14 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   const VEC = `CASE WHEN x.coll = ANY($3::text[]) AND jsonb_typeof(x.body->'embedding') = 'array'
                      AND jsonb_array_length(x.body->'embedding') = ${DIM}
                     THEN (x.body->>'embedding')::vector END`;
+  // the body to store: with RVN_EMBED_IN_VEC=1, the embedding becomes the marker, but ONLY when the vector gives back
+  // exactly these numbers (the same expression REB reads with, under the same PIN); otherwise the full body
+  const SB = !STRIP ? 'x.body' : `CASE WHEN (${VEC}) IS NOT NULL
+                     AND x.body->'embedding' = to_jsonb(((x.body->>'embedding')::vector)::real[]::float8[])
+                    THEN jsonb_set(x.body, '{embedding}', to_jsonb('${MARK}'::text)) ELSE x.body END`;
+  // a writer's `base` (the body as it loaded it, embedding included) against the stored row: equal when the stored
+  // body, embedding rebuilt, is the same — read under PIN
+  const SAME = (t: string): string => `${REB(t)} = x.base::jsonb`;
   // e->'body', not jsonb_to_recordset's body column: that turns a JSON null into SQL NULL,
   // and a record whose value is null ({"lastScan": null}) failed the NOT NULL column
   const X = `SELECT a.n AS ord, a.e->>'coll' AS coll, a.e->>'rid' AS rid, coalesce(a.e->'body', 'null'::jsonb) AS body,
@@ -298,16 +338,17 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   const write = (rows: Up[]): Stmt => ({
     text: `WITH x AS (${X}),
            plain AS (INSERT INTO ${T} (store, coll, rid, body, vec)
-             SELECT $1, x.coll, x.rid, x.body, ${VEC} FROM x WHERE NOT x.checked ORDER BY x.ord
+             SELECT $1, x.coll, x.rid, ${SB}, ${VEC} FROM x WHERE NOT x.checked ORDER BY x.ord
              ON CONFLICT (store, coll, rid) DO UPDATE SET body = excluded.body, vec = excluded.vec,
                     ver = ${T}.ver + 1, updated_at = now()
-             WHERE ${T}.body IS DISTINCT FROM excluded.body),
-           upd AS (UPDATE ${T} t SET body = x.body, vec = ${VEC}, ver = t.ver + 1, updated_at = now()
+             -- vec too: with the embedding stripped, a changed embedding leaves the body (the marker) unchanged
+             WHERE ${T}.body IS DISTINCT FROM excluded.body OR ${T}.vec IS DISTINCT FROM excluded.vec),
+           upd AS (UPDATE ${T} t SET body = ${SB}, vec = ${VEC}, ver = t.ver + 1, updated_at = now()
              FROM x WHERE x.checked AND x.base IS NOT NULL AND t.store = $1 AND t.coll = x.coll AND t.rid = x.rid
-               AND t.body = x.base::jsonb
+               AND ${SAME('t')}
              RETURNING t.coll, t.rid),
            ins AS (INSERT INTO ${T} (store, coll, rid, body, vec)
-             SELECT $1, x.coll, x.rid, x.body, ${VEC} FROM x WHERE x.checked AND x.base IS NULL ORDER BY x.ord
+             SELECT $1, x.coll, x.rid, ${SB}, ${VEC} FROM x WHERE x.checked AND x.base IS NULL ORDER BY x.ord
              ON CONFLICT (store, coll, rid) DO NOTHING
              RETURNING coll, rid)
            SELECT coll, rid FROM upd UNION ALL SELECT coll, rid FROM ins`,
@@ -331,12 +372,12 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
       // process made meanwhile wins over the delete (nothing is lost either way — rec_deleted keeps a copy)
       text: `DELETE FROM ${T} t USING (SELECT a.e->>'coll' AS coll, a.e->>'rid' AS rid, a.e->>'base' AS base, a.e ? 'base' AS checked
                                        FROM jsonb_array_elements($2::jsonb) AS a(e)) x
-             WHERE t.store = $1 AND t.coll = x.coll AND t.rid = x.rid AND (NOT x.checked OR x.base IS NULL OR t.body = x.base::jsonb)`,
+             WHERE t.store = $1 AND t.coll = x.coll AND t.rid = x.rid AND (NOT x.checked OR x.base IS NULL OR ${SAME('t')})`,
       params: [store, JSON.stringify(del)],
     } : null;
-    if (!chunks.length && delStmt) withTable(() => call([delStmt]));
+    if (!chunks.length && delStmt) withTable(() => callPinned([delStmt]));
     chunks.forEach((c, i) => {
-      const res = withTable(() => call(i === chunks.length - 1 && delStmt ? [write(c), delStmt] : [write(c)]));
+      const res = withTable(() => callPinned(i === chunks.length - 1 && delStmt ? [write(c), delStmt] : [write(c)]));
       resolveConflicts(c, res[0]);
     });
   }
@@ -350,9 +391,9 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
       // writers that collided would collide again in lockstep: wait a random, growing moment (synchronous code)
       if (round) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.floor(Math.random() * Math.min(400, 20 * 2 ** Math.min(round, 5))));
       conflicts.rounds++;
-      const [now] = withTable(() => call([{ text: `SELECT coll, rid, body FROM ${T} t JOIN jsonb_to_recordset($2::jsonb) AS x(coll text, rid text) USING (coll, rid) WHERE t.store = $1`,
+      const [now] = withTable(() => callPinned([{ text: `SELECT coll, rid, ${REB('t')} AS body FROM ${T} t JOIN jsonb_to_recordset($2::jsonb) AS x(coll text, rid text) USING (coll, rid) WHERE t.store = $1`,
         params: [store, JSON.stringify(pending.map(({ coll, rid }) => ({ coll, rid })))] }]));
-      const cur = new Map<string, any>(now.map((r: Row) => [`${r.coll}\u0000${r.rid}`, r.body]));
+      const cur = new Map<string, any>(now.map((r: Row) => [`${r.coll}\u0000${r.rid}`, EMB_OK(r.body, `${store} ${r.coll}/${r.rid}`)]));
       const retry: Up[] = [];
       for (const u of pending) {
         const k = `${u.coll}\u0000${u.rid}`;
@@ -365,7 +406,7 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
         retry.push({ ...u, body, base: J(theirs) });
       }
       if (!retry.length) return;
-      const [w] = withTable(() => call([write(retry)]));
+      const [w] = withTable(() => callPinned([write(retry)]));
       const ok = new Set(w.map((r: Row) => `${r.coll}\u0000${r.rid}`));
       pending = retry.filter((u) => !ok.has(`${u.coll}\u0000${u.rid}`));
     }
@@ -399,27 +440,29 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     let where = '';
     for (const [f, v] of Object.entries(opts.eq || {})) { params.push(f, String(v)); where += ` AND body->>$${params.length - 1} = $${params.length}`; }
     if (opts.threshold != null) { params.push(opts.threshold); where += ` AND 1 - (vec <=> $2::vector) >= $${params.length}`; }
-    const [, rows] = withTable(() => call([
+    const [, rows] = withTable(() => callPinned([
       { text: `SET LOCAL hnsw.ef_search = ${Math.max(40, k * 4)}` },
-      { text: `SELECT body, 1 - (vec <=> $2::vector) AS score FROM ${T}
+      { text: `SELECT ${REB('s')} AS body, 1 - (vec <=> $2::vector) AS score FROM ${T} s
                WHERE store = $1 AND coll = $3 AND vec IS NOT NULL${where} ORDER BY vec <=> $2::vector LIMIT $4`, params },
     ]));
     stats.ms += Date.now() - t;
-    return rows.map((r: Row) => ({ ...r.body, score: Number(r.score) }));
+    return rows.map((r: Row) => ({ ...EMB_OK(r.body, `${store} ${coll} (search)`), score: Number(r.score) }));
   }
 
   /** Row-level access for stores that are never loaded as a document (the ReasoningBank). */
+  // every body read here has its embedding rebuilt (REB, pinned) and is checked (EMB_OK)
+  const ok = (list: Row[], coll: string): Row[] => { for (const r of list) EMB_OK(r.body, `${store} ${coll}/${r.rid ?? r.seq}`); return list; };
   const rows = {
-    get: (coll: string, rids: string[]): Row[] => rids.length ? withTable(() => call([{ text: `SELECT rid, body FROM ${T} WHERE store = $1 AND coll = $2 AND rid = ANY($3::text[])`, params: [store, coll, rids] }]))[0] : [],
-    findBy: (coll: string, field: string, value: unknown): Row[] => withTable(() => call([{ text: `SELECT rid, body FROM ${T} WHERE store = $1 AND coll = $2 AND body->>$3 = $4 ORDER BY seq LIMIT 1`, params: [store, coll, field, String(value)] }]))[0],
+    get: (coll: string, rids: string[]): Row[] => rids.length ? ok(withTable(() => callPinned([{ text: `SELECT rid, ${REB('g')} AS body FROM ${T} g WHERE store = $1 AND coll = $2 AND rid = ANY($3::text[])`, params: [store, coll, rids] }]))[0], coll) : [],
+    findBy: (coll: string, field: string, value: unknown): Row[] => ok(withTable(() => callPinned([{ text: `SELECT rid, ${REB('f')} AS body FROM ${T} f WHERE store = $1 AND coll = $2 AND body->>$3 = $4 ORDER BY seq LIMIT 1`, params: [store, coll, field, String(value)] }]))[0], coll),
     count: (coll: string): number => Number(withTable(() => call([{ text: `SELECT count(*) AS n FROM ${T} WHERE store = $1 AND coll = $2`, params: [store, coll] }]))[0][0].n),
     /** Every row, oldest first, in pages — one response is capped at 64 MB. */
     all: (coll: string, eq: Record<string, unknown> = {}): any[] => {
       const out: any[] = []; let after = 0;
       const [f, v] = Object.entries(eq)[0] || [];
       for (;;) {
-        const page = withTable(() => call([{ text: `SELECT seq, body FROM ${T} WHERE store = $1 AND coll = $2 AND seq > $3
-          ${f ? 'AND body->>$5 = $6' : ''} ORDER BY seq LIMIT $4`, params: f ? [store, coll, after, 2000, f, String(v)] : [store, coll, after, 2000] }]))[0];
+        const page = ok(withTable(() => callPinned([{ text: `SELECT seq, ${REB('p')} AS body FROM ${T} p WHERE store = $1 AND coll = $2 AND seq > $3
+          ${f ? 'AND body->>$5 = $6' : ''} ORDER BY seq LIMIT $4`, params: f ? [store, coll, after, 2000, f, String(v)] : [store, coll, after, 2000] }]))[0], coll);
         for (const r of page) out.push(r.body);
         if (page.length < 2000) return out;
         after = page[page.length - 1].seq;

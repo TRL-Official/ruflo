@@ -224,7 +224,6 @@ export async function acquireLock(lockPath: string): Promise<() => void> {
     | (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0));
   while (Date.now() - started < LOCK_WAIT_MS) {
     try {
-      const fd = openSync(lockPath, createFlags, 0o600);
       const ownership = JSON.stringify({
         pid: process.pid,
         acquiredAt: Date.now(),
@@ -234,7 +233,12 @@ export async function acquireLock(lockPath: string): Promise<() => void> {
         boot: BOOT_ID,
         nonce: randomUUID(),
       });
-      try { writeFileSync(fd, ownership); } finally { closeSync(fd); }
+      // [neon-direct] one call: open exclusive, write the owner, close — what openSync('wx') + writeFileSync(fd) +
+      // closeSync did on a real disk; with the state in Neon (digital-twin's neon-fs) it is ONE statement that takes
+      // the lock with its owner, so the lock is never seen without one (RUFLO-ROUND-TRIPS-2026-10-19.md § 6)
+      // [neon-direct] upstream's exclusive, no-follow flags (3.59), passed in the same single call; neon-fs reads
+      // numeric flags too, so it stays one statement there
+      writeFileSync(lockPath, ownership, { flag: createFlags, mode: 0o600 });
       return () => {
         try { if (readLockFile(lockPath) === ownership) unlinkSync(lockPath); } catch { /* already released */ }
       };
@@ -549,7 +553,11 @@ export function loadPolicyState(projectRoot = process.cwd()): PolicyState {
   return parsed;
 }
 
-export async function autoMigratePolicyStateIfNeeded(projectRoot = process.cwd()): Promise<{
+export async function autoMigratePolicyStateIfNeeded(projectRoot = process.cwd(), options: {
+  /** [neon-direct] false: the caller does not use `mode` (CLI start-up), so an existing state is read only when a
+   * configured mode may need applying. Default true: unchanged. */
+  reportMode?: boolean;
+} = {}): Promise<{
   migrated: boolean;
   statePath?: string;
   mode?: PolicyState['mode'];
@@ -557,11 +565,16 @@ export async function autoMigratePolicyStateIfNeeded(projectRoot = process.cwd()
   const target = paths(projectRoot);
   if (existsSync(target.state)) {
     const configured = configuredPolicyMode(projectRoot);
+    // [neon-direct] every ruflo command ran this at start-up and read the whole policy state (2,000 receipts) twice
+    // only to report a mode nobody printed; with the state in Neon that was two round trips per command
+    if (!configured && options.reportMode === false) return { migrated: false, statePath: target.state };
     const current = loadPolicyState(projectRoot);
     if (configured && current.configuredMode !== configured) {
       await withPolicyTransaction(projectRoot, (engine) => engine.setConfiguredMode(configured));
+      return { migrated: false, statePath: target.state, mode: loadPolicyState(projectRoot).mode };
     }
-    return { migrated: false, statePath: target.state, mode: loadPolicyState(projectRoot).mode };
+    // [neon-direct] nothing was written since `current` was read: its mode, not a second read of the same state
+    return { migrated: false, statePath: target.state, mode: current.mode };
   }
   // Only upgrade existing Ruflo installations. A random directory should not
   // acquire policy state merely because `ruflo --version` ran there.
@@ -623,19 +636,32 @@ export async function withPolicyTransaction<T>(
     // subsequent transaction can archive their exact committed bytes.
     const newlyAppended = verified.length - ((loaded.retainedFrom ?? 0) + loaded.receipts.length);
     const pruned = engine.pruneReceipts(Math.max(ledgerRetention(), newlyAppended));
-    // #3164: archive BEFORE writing the shrunk state. If the process crashes
-    // between the two writes, the archive append already landed but
-    // `retainedFrom` on disk still reflects the pre-prune length, so the next
-    // prune recomputes and re-appends the SAME receipts — a harmless,
-    // detectable duplicate (same sequence, identical content), deduped by
-    // `verifyPolicyLedger({ full: true })`. The reverse order (state first)
-    // would instead risk a permanent gap if the process died in between,
-    // which is strictly worse for an audit ledger — never reorder this.
-    if (pruned.length > 0) {
-      appendArchiveDurably(target.archive, pruned, engine);
+    // [neon-direct] the write phase as ONE Neon transaction when digital-twin's neon-fs is loaded (it registers
+    // this hook): the archive append, the state, the anchor log and its mirror were four round trips. commit() throws
+    // if Neon refuses, failing this transaction as a failed write did; abort() drops the queue on any error. Without
+    // neon-fs (plain ruflo, real files) there is no hook and every write goes to disk as before, in the same order.
+    const writeBatch = (globalThis as any)[Symbol.for('neon-fs.batch')] as
+      { begin(): boolean; commit(): void; abort(): void } | undefined;
+    writeBatch?.begin();
+    try {
+      // #3164: archive BEFORE writing the shrunk state. If the process crashes
+      // between the two writes, the archive append already landed but
+      // `retainedFrom` on disk still reflects the pre-prune length, so the next
+      // prune recomputes and re-appends the SAME receipts — a harmless,
+      // detectable duplicate (same sequence, identical content), deduped by
+      // `verifyPolicyLedger({ full: true })`. The reverse order (state first)
+      // would instead risk a permanent gap if the process died in between,
+      // which is strictly worse for an audit ledger — never reorder this.
+      if (pruned.length > 0) {
+        appendArchiveDurably(target.archive, pruned, engine);
+      }
+      const nextState = engine.exportState();
+      await writePolicyState(projectRoot, target.state, nextState, gate.event, undefined, gate.anchorTip);
+      writeBatch?.commit();
+    } catch (error) {
+      writeBatch?.abort();
+      throw error;
     }
-    const nextState = engine.exportState();
-    await writePolicyState(projectRoot, target.state, nextState, gate.event, undefined, gate.anchorTip);
     return result;
   } finally {
     release();

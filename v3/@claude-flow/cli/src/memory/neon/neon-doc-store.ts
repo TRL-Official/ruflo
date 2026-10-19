@@ -57,7 +57,15 @@ function makeCaller(): Caller {
   const sock = holderFor(url);
   const worker = new Worker(new URL('./neon-doc-worker.js', import.meta.url), { workerData: { url, driver, sock }, execArgv });
   worker.unref(); // never keep a CLI process alive
+  // NEON_TRACE=1|2: the number of round trips and their time, per process, to stderr at exit (diagnostics only;
+  // the same summary line as digital-twin's copy, which the store gates count)
+  const tr = (process.env.NEON_TRACE === '1' || process.env.NEON_TRACE === '2') ? { n: 0, ms: 0 } : null;
+  if (tr) process.on('exit', () => process.stderr.write(`[neon-trace doc] ${tr.n} round trips, ${tr.ms} ms\n`));
   return function call(stmts: Stmt[], cache?: LoadCache): Row[][] {
+    const t0 = Date.now();
+    try { return call0(stmts, cache); } finally { if (tr) { tr.n++; tr.ms += Date.now() - t0; } }
+  };
+  function call0(stmts: Stmt[], cache?: LoadCache): Row[][] {
     const sab = new SharedArrayBuffer(4);
     const { port1, port2 } = new MessageChannel();
     worker.postMessage({ stmts, cache, sab, port: port2 }, [port2]);
@@ -68,7 +76,7 @@ function makeCaller(): Caller {
     if (msg.message.error) { const e: any = new Error(`neon-doc-store: ${msg.message.error}`); e.pgCode = msg.message.code; recordAlert('doc-store', e); throw e; }
     if (msg.message.raw !== undefined) return JSON.parse(msg.message.raw).rows;   // a holder reply passed through unparsed
     return msg.message.rows;
-  };
+  }
 }
 
 /** keyed: top-level objects stored one row per sub-key; '*' = every top-level object whose values are all objects. */
@@ -115,6 +123,36 @@ export function merge3(base: any, ours: any, theirs: any): any {
 // One worker per process, shared by every store opened in it.
 let sharedCall: Caller | null = null;
 
+// Batched writes (ported from digital-twin, 2026-10-19, RUFLO-ROUND-TRIPS-2026-10-19.md § 6). Between beginBatch() and
+// commitBatch(), a save() that fits in one chunk queues its statements instead of sending them, and commitBatch()
+// sends every queued statement in ONE call — one transaction, all or nothing — then settles each store's conflicts
+// as an immediate save would. A read through a store with queued writes, and any call that is not a plain read,
+// sends the queue first, so the order of writes never changes. abortBatch() drops the queue and puts each store's
+// snapshot back; a failed commit does the same and throws.
+interface BatchOwner { queued: number; raw: Caller; withTable: <R>(fn: () => R) => R }
+interface BatchItem { owner: BatchOwner; stmts: Stmt[]; done: (res: Row[][]) => void; undo: () => void }
+let batch: { items: BatchItem[] } | null = null;
+function flushBatch(): void {
+  if (!batch || !batch.items.length) return;
+  const items = batch.items; batch.items = [];
+  for (const it of items) it.owner.queued = 0;
+  const stmts: Stmt[] = [PIN]; for (const it of items) stmts.push(...it.stmts);
+  let res: Row[][];
+  try { res = items[0].owner.withTable(() => items[0].owner.raw(stmts)); }
+  catch (e) { for (const it of items.slice().reverse()) it.undo(); throw e; }
+  let i = 1;
+  for (const it of items) { it.done(res.slice(i, i + it.stmts.length)); i += it.stmts.length; }
+}
+export function beginBatch(): void { if (batch) throw new Error('neon-doc-store: a write batch is already open'); batch = { items: [] }; }
+export function commitBatch(): void { try { flushBatch(); } finally { batch = null; } }
+export function abortBatch(): number {
+  if (!batch) return 0;
+  const items = batch.items; batch = null;
+  for (const it of items.slice().reverse()) { it.owner.queued = 0; it.undo(); }
+  return items.length;
+}
+export const batchOpen = (): boolean => !!batch;
+
 // --- embeddings kept once (see the header) ---
 const MARK = 'rvdirect:vec';
 // the body as written, with the embedding rebuilt from vec when it was stripped. `a` = the table alias.
@@ -142,9 +180,15 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   const LAZY = [...lazy];
   const DIM = Number(process.env.RVN_DIM) || 384;
   const WINDOW = Number(process.env.RVN_WINDOW ?? window) || 0;
-  const call = (sharedCall ??= makeCaller());
+  const raw = (sharedCall ??= makeCaller());
+  // inside a write batch: send the queue first unless this is a plain read of a store with nothing queued
+  const owner: BatchOwner = { queued: 0, raw, withTable: (fn) => withTable(fn) };
+  const call: Caller = ((stmts: Stmt[], cache?: any, read = false) => {
+    if (batch && batch.items.length && (owner.queued || !read)) flushBatch();
+    return raw(stmts, cache);
+  }) as Caller;
   // statements whose SQL uses REB: run after PIN, in one transaction; the PIN's own result is dropped
-  const callPinned = (stmts: Stmt[]): Row[][] => call([PIN, ...stmts]).slice(1);
+  const callPinned = (stmts: Stmt[], read = false): Row[][] => (call as any)([PIN, ...stmts], undefined, read).slice(1);
   const STRIP = process.env.RVN_EMBED_IN_VEC === '1';
   let snapshot = new Map<string, string>(); // `${coll}\0${rid}` → JSON of the body as loaded/saved
   // Row ids of lazy-collection elements, by object identity: an element this process loaded or saved keeps
@@ -261,6 +305,12 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     return `${n}:${s}:${v}`;
   };
 
+  // the fingerprint query — also run by others in a round trip of their own (digital-twin's neon-fs: with taking
+  // ruflo's policy lock); vouch(row): does such a row still describe this process's memo?
+  const FP = (): Stmt => ({ text: `SELECT count(*)::int AS n, coalesce(max(seq), 0)::text AS s, coalesce(sum(ver), 0)::text AS v
+                   FROM ${T} WHERE store = $1 AND NOT (coll = ANY($2::text[]))`, params: [store, LAZY] });
+  const vouch = (f: any): boolean => { const ok = !!(MEMO && memo && f && `${f.n}:${f.s}:${f.v}` === memo.fp); if (ok) (stats as any).vouched = ((stats as any).vouched || 0) + 1; return ok; };
+
   /** Read the document; also records what this process has SEEN unless peek (a stat must not widen later deletes). */
   // trust=true (ported from digital-twin, 2026-10-19): answer a repeat load from the memo WITHOUT the fingerprint
   // query — only for a caller that can prove nobody else may have written the store since its last load (digital-twin's
@@ -271,8 +321,7 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     if (MEMO && memo && trust) {
       rows = memo.rows.map((r) => ({ coll: r.coll, rid: r.rid, body: JSON.parse(r.j), j: r.j })); stats.trustHits++;
     } else if (MEMO && memo) {
-      const [[f]] = withTable(() => call([{ text: `SELECT count(*)::int AS n, coalesce(max(seq), 0)::text AS s, coalesce(sum(ver), 0)::text AS v
-                   FROM ${T} WHERE store = $1 AND NOT (coll = ANY($2::text[]))`, params: [store, LAZY] }]));
+      const [[f]] = withTable(() => (call as any)([FP()], undefined, true));
       if (`${f.n}:${f.s}:${f.v}` === memo.fp) { rows = memo.rows.map((r) => ({ coll: r.coll, rid: r.rid, body: JSON.parse(r.j), j: r.j })); stats.memoHits++; }
     }
     if (!rows) {
@@ -286,7 +335,7 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
                  SELECT coll, rid, body, seq, ver FROM (SELECT coll, rid, ${REB('l')} AS body, seq, ver FROM ${T} l
                    WHERE store = $1 AND coll = ANY($2::text[]) ORDER BY seq DESC LIMIT $3) w
                ) d ORDER BY seq`, params: [store, LAZY, WINDOW] }];
-      [rows] = withTable(() => (cache ? call(SELECT, cache) : callPinned(SELECT)));
+      [rows] = withTable(() => (cache ? (call as any)(SELECT, cache, true) : callPinned(SELECT, true)));
       fresh = true;
     }
     stats.loads++; stats.ms += Date.now() - t;
@@ -359,7 +408,7 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
            SELECT coll, rid FROM upd UNION ALL SELECT coll, rid FROM ins`,
     params: [store, JSON.stringify(rows), LAZY],
   });
-  function writeRows(up: Up[], del: Del[] = []): void {
+  function writeRows(up: Up[], del: Del[] = [], undo: () => void = () => {}): void {
     if (!up.length && !del.length) return;
     memo = null; // any write: the next load reads Neon again
     const items: (Up & { ord: number })[] = up.map((u, i) => ({ ord: i, coll: u.coll, rid: u.rid, body: u.body, ...('base' in u ? { base: u.base } : {}) }));
@@ -380,6 +429,13 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
              WHERE t.store = $1 AND t.coll = x.coll AND t.rid = x.rid AND (NOT x.checked OR x.base IS NULL OR ${SAME('t')})`,
       params: [store, JSON.stringify(del)],
     } : null;
+    if (batch && chunks.length <= 1) { // a write batch is open: queue it (one chunk only; a bigger save goes now, in order)
+      const stmts: Stmt[] = chunks.length ? (delStmt ? [write(chunks[0]), delStmt] : [write(chunks[0])]) : (delStmt ? [delStmt] : []);
+      if (!stmts.length) return;
+      batch.items.push({ owner, stmts, undo, done: (res) => { if (chunks.length) resolveConflicts(chunks[0], res[0]); } });
+      owner.queued++; (stats as any).batched = ((stats as any).batched || 0) + 1;
+      return;
+    }
     if (!chunks.length && delStmt) withTable(() => callPinned([delStmt]));
     chunks.forEach((c, i) => {
       const res = withTable(() => callPinned(i === chunks.length - 1 && delStmt ? [write(c), delStmt] : [write(c)]));
@@ -430,7 +486,8 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
     const del: Del[] = [];
     for (const [k, j] of snapshot) if (!now.has(k)) { const [coll, rid] = k.split('\u0000'); del.push({ coll, rid, base: j }); }
     if (!up.length && !del.length) return { upserts: 0, deletes: 0 };
-    writeRows(up, del);
+    const before = snapshot;
+    writeRows(up, del, () => { snapshot = before; memo = null; }); // undo: only if a write batch is dropped
     memo = null; // what Neon holds now is not what was loaded
     snapshot = now;
     stats.saves++; stats.upserts += up.length; stats.deletes += del.length; stats.ms += Date.now() - t;
@@ -498,11 +555,13 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   /** Remove the whole store (a deleted file). */
   function drop(): void { withTable(() => call([{ text: `DELETE FROM ${T} WHERE store = $1`, params: [store] }])); snapshot = new Map(); memo = null; }
   /** Does the store hold anything? One indexed lookup. */
-  function exists(): boolean { return withTable(() => call([{ text: `SELECT 1 FROM ${T} WHERE store = $1 LIMIT 1`, params: [store] }]))[0].length > 0; }
+  function exists(): boolean { return withTable(() => (call as any)([{ text: `SELECT 1 FROM ${T} WHERE store = $1 LIMIT 1`, params: [store] }], undefined, true))[0].length > 0; }
 
   /** The full DDL, idempotent — for a store table created before the deleted-rows archive. */
   function ensure(): void { call(DDL); }
-  return { load, save, search, rows, drop, exists, ensure, stats, conflicts, query: (text: string, params?: unknown[]) => withTable(() => call([{ text, params }])[0]) };
+  return { load, save, search, rows, drop, exists, ensure, stats, conflicts, query: (text: string, params?: unknown[]) => withTable(() => call([{ text, params }])[0]),
+    // several statements in one round trip (one transaction): the results, one per statement
+    queryMany: (stmts: Stmt[]): Row[][] => withTable(() => call(stmts)), fpStmt: FP, vouch, hasMemo: (): boolean => !!(MEMO && memo) };
 }
 
 export type DocStore = ReturnType<typeof openDocStore>;

@@ -162,7 +162,7 @@ export class CLI {
         // AgentDB, MCP, hooks, and swarm workflows keep their exact behavior.
         try {
           const { autoMigratePolicyStateIfNeeded } = await import('./services/policy-runtime.js');
-          const migration = await autoMigratePolicyStateIfNeeded(process.cwd());
+          const migration = await autoMigratePolicyStateIfNeeded(process.cwd(), { reportMode: false }); /* [neon-direct] */
           if (migration.migrated && this.output.isVerbose()) {
             this.output.printDebug(`Initialized agentic policy compatibility state (${migration.mode})`);
           }

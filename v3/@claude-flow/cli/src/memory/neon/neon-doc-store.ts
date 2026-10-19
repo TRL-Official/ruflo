@@ -152,7 +152,7 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   // trajectories traj_<seconds>, so two hooks in one second share an id, and with the collection not loaded
   // the second would overwrite the first row. (Ported from digital-twin's neon-doc-store.cjs, 2026-10-17.)
   const lazyRid = new WeakMap<object, string>();
-  const stats = { loads: 0, saves: 0, upserts: 0, deletes: 0, ms: 0, memoHits: 0, searchExact: 0, searchIndex: 0 };
+  const stats = { loads: 0, saves: 0, upserts: 0, deletes: 0, ms: 0, memoHits: 0, trustHits: 0, searchExact: 0, searchIndex: 0 };
 
   let uidN = 0;
   const uid = () => `${process.pid.toString(36)}${Date.now().toString(36)}${(uidN++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -262,10 +262,15 @@ export function openDocStore({ store, keyed = [], lazy = [], window = 0 }: DocSt
   };
 
   /** Read the document; also records what this process has SEEN unless peek (a stat must not widen later deletes). */
-  function load({ peek = false }: { peek?: boolean } = {}): Doc | null {
+  // trust=true (ported from digital-twin, 2026-10-19): answer a repeat load from the memo WITHOUT the fingerprint
+  // query — only for a caller that can prove nobody else may have written the store since its last load (digital-twin's
+  // neon-fs: the receipt archive while its process holds the policy lock). Any write here drops the memo.
+  function load({ peek = false, trust = false }: { peek?: boolean; trust?: boolean } = {}): Doc | null {
     const t = Date.now();
     let rows: Row[] | null = null, fresh = false;
-    if (MEMO && memo) {
+    if (MEMO && memo && trust) {
+      rows = memo.rows.map((r) => ({ coll: r.coll, rid: r.rid, body: JSON.parse(r.j), j: r.j })); stats.trustHits++;
+    } else if (MEMO && memo) {
       const [[f]] = withTable(() => call([{ text: `SELECT count(*)::int AS n, coalesce(max(seq), 0)::text AS s, coalesce(sum(ver), 0)::text AS v
                    FROM ${T} WHERE store = $1 AND NOT (coll = ANY($2::text[]))`, params: [store, LAZY] }]));
       if (`${f.n}:${f.s}:${f.v}` === memo.fp) { rows = memo.rows.map((r) => ({ coll: r.coll, rid: r.rid, body: JSON.parse(r.j), j: r.j })); stats.memoHits++; }

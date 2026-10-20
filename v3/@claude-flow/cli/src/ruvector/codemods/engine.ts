@@ -17,21 +17,9 @@
 import ts from 'typescript';
 import { buildReassignmentResolver } from './scope-analysis.js';
 
-export type CodemodIntent = 'var-to-const' | 'remove-console' | 'add-logging';
-
-/** Intents this engine can apply deterministically with $0 cost. */
-export const DETERMINISTIC_CODEMOD_INTENTS: readonly CodemodIntent[] = [
-  'var-to-const',
-  'remove-console',
-  'add-logging',
-] as const;
-
-/** Intents recognised by the router but NOT safe as deterministic codemods. */
-export const MODEL_ROUTED_INTENTS: readonly string[] = [
-  'add-types',
-  'add-error-handling',
-  'async-await',
-] as const;
+// [neon-direct] the intent lists live in intents.ts (no `typescript` import), re-exported here unchanged
+import { isDeterministicCodemod, type CodemodIntent } from './intents.js';
+export { DETERMINISTIC_CODEMOD_INTENTS, MODEL_ROUTED_INTENTS, isDeterministicCodemod, type CodemodIntent } from './intents.js';
 
 export type CodemodLanguage = 'javascript' | 'typescript' | 'jsx' | 'tsx';
 
@@ -51,10 +39,6 @@ interface TextEdit {
   start: number;
   end: number;
   replacement: string;
-}
-
-export function isDeterministicCodemod(intent: string): intent is CodemodIntent {
-  return (DETERMINISTIC_CODEMOD_INTENTS as readonly string[]).includes(intent);
 }
 
 // ============================================================================

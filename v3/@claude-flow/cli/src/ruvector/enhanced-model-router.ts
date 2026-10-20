@@ -12,7 +12,21 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { extname, isAbsolute, resolve as resolvePath } from 'path';
 import { ClaudeModel, getModelRouter, ModelRouter, ModelRoutingResult } from './model-router.js';
-import { applyCodemod, isDeterministicCodemod, type CodemodLanguage } from './codemods/engine.js';
+import { isDeterministicCodemod } from './codemods/intents.js';
+import type { CodemodLanguage } from './codemods/engine.js';
+// [neon-direct] The codemod engine imports `typescript`, which @claude-flow/cli does not depend on. Loaded statically,
+// a missing `typescript` failed this whole module, and `hooks pre-task` / `hooks_route` silently lost the model
+// recommendation. Now it is loaded in the background: routing never needs it, and a Tier-1 edit is only verified or
+// applied when it is there (otherwise Tier 1 stays best-effort, as for an unreadable file).
+type CodemodEngine = typeof import('./codemods/engine.js');
+let codemodEngine: CodemodEngine | null = null;
+const codemodEngineReady: Promise<CodemodEngine | null> = import('./codemods/engine.js')
+  .then((m) => (codemodEngine = m))
+  .catch(() => null);
+function applyCodemod(...args: Parameters<CodemodEngine['applyCodemod']>): ReturnType<CodemodEngine['applyCodemod']> {
+  if (!codemodEngine) throw new Error('codemod engine unavailable: the "typescript" package is not installed');
+  return codemodEngine.applyCodemod(...args);
+}
 
 /** Map a file path to the codemod engine's language, falling back to a hint. */
 function codemodLanguageFor(filePath: string, fallback?: string): CodemodLanguage {
@@ -404,6 +418,7 @@ export class EnhancedModelRouter {
         let tier1 = true;
         let edits: number | undefined;
         if (fp && existsSync(fp)) {
+          await codemodEngineReady;
           try {
             const code = readFileSync(fp, 'utf-8');
             const res = applyCodemod(intent.type, code, { language: codemodLanguageFor(fp, intent.language) });
@@ -645,6 +660,7 @@ export class EnhancedModelRouter {
       return { success: false, changed: false, edits: 0 };
     }
 
+    if (!codemodEngine) return { success: false, changed: false, edits: 0 }; // [neon-direct] no `typescript`: cannot apply
     const originalCode = context?.originalCode ?? readFileSync(filePath, 'utf-8');
     const language = codemodLanguageFor(filePath, intent.language);
     const result = applyCodemod(intent.type, originalCode, { language });

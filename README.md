@@ -118,6 +118,8 @@ User → Ruflo (CLI/MCP) → Router → Swarm → Agents → Memory → LLM prov
 
 A harness is the workbench around the model: it organizes tasks, carries context between steps and helps check results. **This establishes Ruflo's lineage, not a universal first across every Claude Code tool.** [See the illustrated explainer, exact commits and earlier ecosystem context](docs/harness-origins.md).
 
+**Grok Build:** `npx ruflo init --grok` writes the project host surface (`.grok/`, the team bus, and the operator guide) and nothing outside the project; add `--dry-run` to preview. Setup, the `spawn_subagent` contract, the optional status row, and what to re-check when Grok updates: [the Grok operator guide](v3/@claude-flow/cli/templates/grok/docs/README.md).
+
 <details>
 <summary><strong>📖 Background — where the name comes from</strong></summary>
 
@@ -240,6 +242,7 @@ This adds slash commands and agent definitions. `ruflo-core` (installed above) d
 | [**ruflo-browser**](plugins/ruflo-browser/README.md) | Automate browser testing with Playwright |
 | [**ruflo-jujutsu**](plugins/ruflo-jujutsu/README.md) | Analyze git diffs, score risk, suggest reviewers |
 | [**ruflo-docs**](plugins/ruflo-docs/README.md) | Generate and maintain documentation automatically |
+| [**agentic-qe-fleet**](https://github.com/proffesor-for-testing/agentic-qe/tree/v3.15.11/plugins/agentic-qe-fleet) | External, maintained by [Agentic QE](https://github.com/proffesor-for-testing/agentic-qe): 11 QE agents, test generation, coverage, chaos and TDD skills, the `agentic-qe` MCP server, and a guard for AQE learning data (`/plugin install agentic-qe-fleet@ruflo`). Install it from one marketplace only, `agentic-qe` or `ruflo`: enabled from both, its mod and commands load twice |
 
 #### Security & Compliance
 

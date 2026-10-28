@@ -867,6 +867,9 @@ export const claimsTools: MCPTool[] = [
       const underloaded = loads.filter(l => l.claims.length < maxClaims * targetUtilization * 0.5);
 
       const suggestions: Array<{ issueId: string; from: string; to: string; reason: string }> = [];
+      // Claim counts including moves suggested so far, so one target is not
+      // handed more claims than maxClaims allows.
+      const plannedCount = new Map(loads.map(l => [l.agentId, l.claims.length]));
 
       for (const over of overloaded) {
         // Find low-progress claims to redistribute
@@ -875,8 +878,9 @@ export const claimsTools: MCPTool[] = [
           .slice(0, over.claims.length - Math.ceil(maxClaims * targetUtilization));
 
         for (const claim of movable) {
-          const target = underloaded.find(u => u.agentType === over.agentType && u.claims.length < maxClaims);
+          const target = underloaded.find(u => u.agentType === over.agentType && plannedCount.get(u.agentId)! < maxClaims);
           if (target) {
+            plannedCount.set(target.agentId, plannedCount.get(target.agentId)! + 1);
             suggestions.push({
               issueId: claim.issueId,
               from: `agent:${over.agentId}:${over.agentType}`,

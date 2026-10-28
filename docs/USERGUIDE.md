@@ -647,6 +647,24 @@ y sends it · n cancels · it expires in 59 s
 
 **In Claude Code**, the same console has an optional Orbital look and a Theme Studio: run `/ruflo themes`. See the [console README](../plugins/ruflo-console/README.md#orbital-theme).
 
+### Managed cloud agents (optional, opt-in)
+
+Besides local WASM agents (`wasm_agent_*`), `ruflo-agent` can run an agent in Anthropic's cloud through the Claude Managed Agents beta (`managed_agent_*`). It needs `ANTHROPIC_API_KEY` (or `CLAUDE_API_KEY`) and Managed Agents beta access; without a key every tool says so and nothing is called. Local WASM agents need neither.
+
+**Dynamic workflows.** A cloud agent can start a workflow of parallel workers. You opt in per agent with `dynamicWorkflows: true` and a mandatory `budgetCents` (an integer US-cents string; requests already in flight can overshoot). Networking is limited, and `predefinedAgents` restricts which workers may run. Provider completion is **not** correctness: results come back as `verification: "unverified"`, so inspect worker threads and run your own tests before keeping anything.
+
+**In the console.** Managed sessions appear on the Workflows page with their reported budget, blockers and worker counts (Learning shows advisory evidence). Showing them makes no provider calls. A session that is running or rescheduling reads as running; one stopped at its budget or waiting for an action reads as active, not finished. Inspect, interrupt and terminate are palette entries bound to one session and use the same confirm card as every other change.
+
+**Host settings (all off by default).**
+
+| Setting | What it turns on |
+|---|---|
+| `RUFLO_MANAGED_CONTROL=1` + `RUFLO_MANAGED_CONTROL_SESSIONS=sesn_a,sesn_b` | `managed_agent_control` and `managed_agent_interrupt` act only on the listed sessions, after a fresh read of the provider's state. Once set, `managed_agent_terminate` obeys the same list and deletes only that session's own environment. |
+| `RUFLO_MANAGED_LEARNING=1` + `RUFLO_MANAGED_VERIFIER_PUBLIC_KEY` | Verified advisory learning: signed outcomes are checked against your public key, unsigned ones stay quarantined, and a bounded feedback cycle can recommend a strategy. Nothing changes routing by itself. |
+| `RUFLO_MANAGED_AGENTS_BASE_URL` | Operator-only override of the API origin (an HTTPS origin, no credentials, path or redirects). It is never a tool argument, so a prompt cannot point your API key somewhere else. |
+
+**Limits worth knowing.** The verifier signs observations with a key that sits in the same user account as the checks it runs, so only run checks that **you** wrote, never ones an agent produced. After a crash a lock file can be left behind; remove it by hand once no ruflo process is running. Live execution against the provider has not been exercised in this release. The full list is in [ADR 0004](../plugins/ruflo-agent/docs/adrs/0004-verified-learning-and-console.md#amendment-independent-review-and-known-limits-2026-10-25); the plugin's tools are in the [ruflo-agent README](../plugins/ruflo-agent/README.md).
+
 <details>
 <summary>🤖 <strong>OpenAI Codex CLI Support</strong> — Full Codex integration with self-learning</summary>
 
@@ -1470,6 +1488,10 @@ Click **Refresh** in the MCP settings to connect. Windsurf supports up to 100 MC
 
 <details>
 <summary>🤖 <strong>ChatGPT</strong></summary>
+
+**RuFlo Federation plugin (no server to run):** Ruflo is available in ChatGPT as a plugin. Open [RuFlo Federation in ChatGPT](https://chatgpt.com/plugins/plugin_asdk_app_6ab674ff53c48191bb37040c343e31f3) and add it to your workspace. It connects to the hosted endpoint `https://x.ruv.io/chatgpt/mcp` with OAuth 2.0 (PKCE) and exposes 12 tools for federation status, audit, publishing and work triage; administrative membership tools and secret-bearing inputs are not exposed. Submission details are in [`chatgpt-plugin/`](../chatgpt-plugin/README.md).
+
+**Or connect your own MCP server.**
 
 **Requires:** ChatGPT Pro or Plus subscription with Developer Mode enabled
 

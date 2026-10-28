@@ -26,6 +26,12 @@ import type { FederationNode } from '../domain/entities/federation-node.js';
 import { FederationNodeState } from '../domain/value-objects/federation-node-state.js';
 
 /** What gets emitted on the event bus per messageType. */
+/** Message types whose policy denial is enforced even outside enforce mode. */
+const CONSEQUENTIAL_MESSAGE_TYPES: ReadonlySet<string> = new Set([
+  'task-assignment', 'memory-query', 'context-share', 'trust-change',
+  'topology-change', 'agent-spawn', 'claim-event', 'agent-handoff',
+]);
+
 export const FEDERATION_INBOUND_EVENT_PREFIX = 'federation:inbound';
 
 /** Reasons we reject an inbound message — constant strings, no oracle leak. */
@@ -379,6 +385,10 @@ export async function dispatchInbound(
   }
 
   const authorizationMode = deps.authorizationMode ?? 'legacy';
+  // Message types that start work, read memory or change who is trusted. A denial
+  // for one of these is final in every mode: legacy/observe only soften claim
+  // checks for the rest, they never deliver what the policy engine refused.
+  const consequential = CONSEQUENTIAL_MESSAGE_TYPES.has(message.type);
   if (
     authorizationMode !== 'legacy' &&
     authorizationMode !== 'observe' &&
@@ -408,7 +418,7 @@ export async function dispatchInbound(
       }
       authorizationDecision = decision;
     } catch {
-      if (authorizationMode === 'enforce') {
+      if (authorizationMode === 'enforce' || consequential) {
         await deps.audit.log('message_rejected', {
           sourceNodeId,
           metadata: { address, reason: 'AUTHORIZATION_ERROR', messageType: message.type },
@@ -430,7 +440,7 @@ export async function dispatchInbound(
   }
 
   if (authorizationDecision && !authorizationDecision.allowed) {
-    if (authorizationMode === 'enforce') {
+    if (authorizationMode === 'enforce' || consequential) {
       await deps.audit.log('message_rejected', {
         sourceNodeId,
         metadata: {

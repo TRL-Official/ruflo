@@ -29,6 +29,9 @@ import { XRUV } from './xruv'
 import { VEC, vecSpec, vecWhy } from './vector'
 import { selection } from './views/select'
 import { plain } from './data/parse'
+import { managedAction } from './managed-actions'
+import { pick } from './data/workflows-nav'
+import { workflowsModelOf } from './wf-live'
 
 export type PaletteRun =
   | { kind: 'spec'; spec: ActionSpec | null; why: string }
@@ -84,6 +87,22 @@ export function paletteEntries(state: State, nowMs: number): PaletteEntry[] {
   const { claim, agent, task } = selection(state)
   const out: PaletteEntry[] = []
   const add = (id: string, group: string, label: string, run: PaletteRun) => out.push({ id, group, label, run })
+
+  // Exact session-bound ids, never a text-taking command or a selected-run alias: changing the cursor cannot retarget a call.
+  // These local facts admit a target only. The MCP control handler checks fresh provider state and host policy on execution.
+  const managedSessions = state.snapshot?.managed?.sessions ?? []
+  if (managedSessions.length) {
+    const model = workflowsModelOf(state, nowMs)
+    const selected = model === null ? null : pick(state.wf.ui, model.runs).run
+    const sessions = [...managedSessions].sort((a, b) => Number(b.sessionId === selected?.id) - Number(a.sessionId === selected?.id))
+    for (const session of sessions) {
+      for (const action of ['inspect', 'interrupt', 'terminate'] as const) {
+        const spec = managedAction(session.sessionId, action)
+        if (spec === null) continue
+        add(`managed-${action}-${session.sessionId}`, 'managed', `${action} managed session ${session.sessionId}${session.sessionId === selected?.id ? ' (selected)' : ''}`, { kind: 'spec', spec, why: 'managed controls require a valid session id and fresh host policy' })
+      }
+    }
+  }
 
   for (const amount of BUDGET_PRESETS) add(`cost-budget-${amount}`, 'cost', `set ruflo-mods budget to $${amount}`, { kind: 'spec', spec: setBudget(state, String(amount)), why: budgetWhy(state, String(amount)) })
   add('cost-budget', 'cost', 'cost-budget <amount>: set ruflo-mods costBudgetUsd (0.01–10000)', { kind: 'text', keyword: 'cost-budget', make: text => setBudget(state, text), why: text => budgetWhy(state, text) })

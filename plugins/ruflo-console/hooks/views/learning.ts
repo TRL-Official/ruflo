@@ -1,4 +1,5 @@
 import type { RenderElement } from 'claude-code'
+import { managedLearningRows } from './managed'
 
 import type { Intelligence } from '../data/cli'
 import { ago, art, col, count, kv, live, pct, picture, row, section, sourceLine, starts, text, THEME, type Ctx } from './common'
@@ -138,6 +139,7 @@ export function learningView(ctx: Ctx): RenderElement {
     text(ctx, 'live engine: hooks_intelligence_stats in a fresh CLI process, so in-memory counters start at zero there', { dimColor: true }),
   ]
   const rows: RenderElement[] = [
+    ...managedLearningRows(ctx),
     ...section(ctx, 'learn-router', 'Router', 'ruflo-mods · routing-outcomes.json', routerRows, true),
     ...section(ctx, 'learn-pipeline', 'Pipeline', 'RETRIEVE → JUDGE → DISTILL → CONSOLIDATE', pipelineRows, true),
     ...section(ctx, 'learn-sona', 'SONA · ReasoningBank', 'neural/stats.json', sonaRows, false),

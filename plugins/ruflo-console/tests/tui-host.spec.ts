@@ -3,10 +3,11 @@
  * program that runs is the ruflo CLI by argv; everything that needs the Claude Code engine is refused. Run with
  *   npx vitest run plugins/ruflo-console/tests/tui-host.spec.ts
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { cliArgv, createNodeHost } from '../tui/node-host'
 
@@ -30,7 +31,7 @@ beforeAll(() => {
   // A CLI stand-in: prints its argv and whether a parent secret reached its environment.
   writeFileSync(join(root, 'cli.mjs'), 'console.log(JSON.stringify({ argv: process.argv.slice(2), leaked: process.env.OPENROUTER_API_KEY ?? null, cwd: process.cwd() }))')
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 const hostOf = (extra = {}) => createNodeHost({ cwd: project, home, cliEntry: join(root, 'cli.mjs'), ...extra })
 

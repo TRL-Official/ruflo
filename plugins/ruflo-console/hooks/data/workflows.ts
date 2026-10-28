@@ -11,6 +11,7 @@
  * Unknown event types and keys are ignored, a half-written last line is dropped, and a missing source is a missing fact:
  * nothing here is estimated.
  */
+import type { ManagedSession } from './managed'
 import { ESCAPES, HIDDEN, INVISIBLE, shortId, type AgentRecord } from './parse'
 
 export type AgentState = 'running' | 'done' | 'failed' | 'stale' | 'idle' | 'queued'
@@ -36,6 +37,8 @@ export type WfAgent = {
   lastTool?: string
   /** Set for a ruflo agent: what the confirm-gated verbs act on. */
   ruflo?: AgentRecord
+  /** Provider completion is never a correctness badge. */
+  isUnverified?: boolean
 }
 
 export type WfPhase = { title: string; detail?: string; agents: WfAgent[]; done: number; total: number; running: number; failed: number }
@@ -45,7 +48,7 @@ export type RunState = 'running' | 'completed' | 'failed' | 'stalled' | 'finishe
 export type WfRun = {
   id: string
   name: string
-  kind: 'workflow' | 'ruflo-swarm'
+  kind: 'workflow' | 'ruflo-swarm' | 'managed'
   state: RunState
   phases: WfPhase[]
   running: number
@@ -65,6 +68,7 @@ export type WfRun = {
   updatedMs?: number
   isStale?: boolean
   listed?: number
+  managed?: ManagedSession
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | null => (typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null)

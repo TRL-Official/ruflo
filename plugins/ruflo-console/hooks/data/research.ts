@@ -4,6 +4,7 @@
  * document. Local only: nothing here reaches the network, and the script path comes from `installed_plugins.json`,
  * validated, never from typed text. Read-only: the section stores and starts nothing.
  */
+import { safeInstallPath } from './cost-ledger'
 import type { Probe } from './cli'
 import { jsonObject, msOf, recordOf, stringOf } from './parse'
 import { measureOf } from './safe'
@@ -32,12 +33,8 @@ const STATUSES: readonly string[] = ['done', 'truncated', 'failed']
 const MAX_RECORDS = 8
 const MAX_FINDINGS = 500
 
-/** An absolute POSIX path of a plugin's install directory: no `..`, no control characters, no shell-looking text. */
-export const safeInstallPath = (value: unknown): string | undefined => {
-  const path = typeof value === 'string' ? value : ''
-
-  return /^\/[A-Za-z0-9._@+/ -]{1,300}$/.test(path) && !path.split('/').includes('..') ? path : undefined
-}
+/** An absolute path of a plugin's install directory (POSIX, or drive-lettered on Windows): data/cost-ledger.ts holds the one check. */
+export { safeInstallPath }
 
 const countGrades = (findings: readonly unknown[]): Record<Grade, number> => {
   const grades: Record<Grade, number> = { High: 0, Medium: 0, Low: 0 }

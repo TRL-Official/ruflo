@@ -7,6 +7,7 @@
  */
 import type { ReaderFs } from './files'
 import { plain } from './parse'
+import { hasParentSegment, isAbsolutePath, joinPath } from './paths'
 
 export type CatalogPlugin = {
   name: string
@@ -74,17 +75,23 @@ async function pluginOf(fs: ReaderFs, location: string, entry: Record<string, un
 
   if (typeof name !== 'string' || !NAME.test(name) || (source === null && external === null)) return null
 
-  const dir = source !== null ? `${location}/${source}` : (installed.get(name) ?? '')
+  const dir = source !== null ? joinPath(location, source) : (installed.get(name) ?? '')
 
   if (dir === '') {
     return { name, options: [], description: plain(typeof entry.description === 'string' ? entry.description : '', 400), version: null, dir, skills: [], agents: [], commands: [], hasMcp: false, isMod: false, ...(external !== null && { external }) }
   }
 
-  const manifest = await fs.read(`${dir}/.claude-plugin/plugin.json`).then(
+  const manifest = await fs.read(joinPath(dir, '.claude-plugin', 'plugin.json')).then(
     text => recordOf(JSON.parse(text)),
     () => null,
   )
-  const [skills, agents, commands, hasMcp, isMod] = await Promise.all([namesIn(fs, `${dir}/skills`, 'dir'), namesIn(fs, `${dir}/agents`, 'md'), namesIn(fs, `${dir}/commands`, 'md'), exists(fs, `${dir}/.mcp.json`), exists(fs, `${dir}/hooks/register.ts`)])
+  const [skills, agents, commands, hasMcp, isMod] = await Promise.all([
+    namesIn(fs, joinPath(dir, 'skills'), 'dir'),
+    namesIn(fs, joinPath(dir, 'agents'), 'md'),
+    namesIn(fs, joinPath(dir, 'commands'), 'md'),
+    exists(fs, joinPath(dir, '.mcp.json')),
+    exists(fs, joinPath(dir, 'hooks', 'register.ts')),
+  ])
   const version = typeof manifest?.version === 'string' ? plain(manifest.version, 30) : typeof entry.version === 'string' ? plain(entry.version, 30) : null
 
   const options = Object.keys(recordOf(manifest?.userConfig) ?? {}).filter(key => NAME.test(key)).slice(0, 60)
@@ -97,9 +104,9 @@ async function pluginOf(fs: ReaderFs, location: string, entry: Record<string, un
  * its install path (absolute, already checked by the caller): an external plugin is read from there.
  */
 export async function readCatalog(fs: ReaderFs, location: string, installed: ReadonlyMap<string, string> = new Map()): Promise<CatalogPlugin[] | null> {
-  if (!location.startsWith('/') || location.split('/').includes('..')) return null
+  if (!isAbsolutePath(location) || hasParentSegment(location)) return null
 
-  const raw = await fs.read(`${location}/.claude-plugin/marketplace.json`).catch(() => null)
+  const raw = await fs.read(joinPath(location, '.claude-plugin', 'marketplace.json')).catch(() => null)
   let list: unknown[] = []
 
   try {
@@ -134,7 +141,7 @@ export async function readCatalog(fs: ReaderFs, location: string, installed: Rea
 export async function readDoc(fs: ReaderFs, plugin: CatalogPlugin, kind: 'skill' | 'agent' | 'command', name: string): Promise<{ description: string; lines: string[] } | null> {
   if (!NAME.test(name) || plugin.dir === '') return null
 
-  const path = kind === 'skill' ? `${plugin.dir}/skills/${name}/SKILL.md` : `${plugin.dir}/${kind === 'agent' ? 'agents' : 'commands'}/${name}.md`
+  const path = kind === 'skill' ? joinPath(plugin.dir, 'skills', name, 'SKILL.md') : joinPath(plugin.dir, kind === 'agent' ? 'agents' : 'commands', `${name}.md`)
   const stat = await fs.stat(path).catch(() => undefined)
 
   if (stat === undefined || (stat.size ?? 0) > DOC_BYTES) return null

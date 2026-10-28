@@ -3,10 +3,11 @@
  * (an injected fetch), a model key read by NAME. Nothing reaches the real network or a real Codex.
  *   npx vitest run plugins/ruflo-console/tests/tui-ai-host.spec.ts
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { createNodeHost, resolveCodex } from '../tui/node-host'
 
@@ -22,9 +23,7 @@ beforeAll(() => {
   mkdirSync(join(root, 'project'), { recursive: true })
   mkdirSync(codexHome, { recursive: true })
 })
-afterAll(() => {
-  rmSync(root, { recursive: true, force: true })
-})
+afterAll(() => removeTree(root))
 
 const host = (ai: Parameters<typeof createNodeHost>[0]['ai'] = { codexBin: FAKE, allowedHosts: ['openrouter.ai'], keyEnvs: ['OPENROUTER_API_KEY'] }) => createNodeHost({ cwd: join(root, 'project'), home: root, ai })
 

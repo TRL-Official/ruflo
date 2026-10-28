@@ -20,6 +20,8 @@ import { PROJECT, under } from './data/files'
 import { readAttempt, type Attempt, type RunRead } from './data/mcp-run'
 import { parseMissions } from './data/missions'
 import { parseTasks, plain, recordOf, type TaskRecord } from './data/parse'
+import { writeFlavorReady } from './data/write-flavor'
+import { writeVia } from './data/write-via'
 import { stageOf, toMissionPlan, type Profile } from './goap'
 import { checkLimit, MISSION_OBJECTIVE_MAX } from './full-text'
 import type { Host } from './host'
@@ -28,6 +30,17 @@ import type { LedgerTask, MissionRecord } from './mission-types'
 import { CLI_PREFIXES, type State } from './state'
 
 export const argvOf = (state: State, tool: string, params: unknown): string[] => [...CLI_PREFIXES[state.options.cli], 'mcp', 'exec', '-t', tool, '-p', JSON.stringify(params)]
+
+/**
+ * The mission plan is ~7 KB with ~750 quotes, so as one `-p` argument it passes cmd.exe's 8191-character line once Windows argv quoting
+ * has escaped it ("The command line is too long."). It goes in a file instead, read by `ruflo mission plan --plan-file` (same MissionService
+ * as the mission_plan tool, same answer shape; the CLI prints the answer as bare JSON, with no `Result:` line).
+ */
+export const planFileOf = (state: State, stamp: string): string => under(state.cwd, `.claude-flow/missions/console-plan-${stamp}.json`)
+
+export const planArgv = (state: State, params: { requestId: string; missionId: string; expectedRevision: number }, file: string): string[] => [
+  ...CLI_PREFIXES[state.options.cli], 'mission', 'plan', '--mission', params.missionId, '--expected-revision', String(params.expectedRevision), '--request-id', params.requestId, '--plan-file', file,
+]
 
 export const taskType = (profile: Profile) => (profile === 'bugfix' ? 'bugfix' : profile === 'refactor' ? 'refactor' : profile === 'research' ? 'research' : 'feature')
 
@@ -174,7 +187,24 @@ export function createSpec(state: State, host: Host, onDone: () => void): Action
 
       if (ms <= 0) return outOfTime
 
-      const run = await within<RunRead>(host.run(argvOf(state, tool, params), ms + HOST_GRACE_MS).catch((error: unknown) => ({ error })), ms, { timedOutMs: ms })
+      const start = async (): Promise<RunRead> => {
+        if (tool !== 'mission_plan') return host.run(argvOf(state, tool, params), ms + HOST_GRACE_MS)
+
+        const file = planFileOf(state, stamp)
+        const written = await writeVia(await writeFlavorReady(), host, { kind: 'replace', path: file, text: JSON.stringify(body), hasDir: false })
+
+        if (written.exitCode !== 0) return { error: new Error(`the plan file could not be written: ${written.stderr}`) }
+
+        const run = await host.run(planArgv(state, params as { requestId: string; missionId: string; expectedRevision: number }, file), ms + HOST_GRACE_MS)
+
+        // readAttempt reads what `mcp exec` prints after its `Result:` line; `mission plan` prints just the answer (JSON from a line-start brace;
+        // a daemon notice such as `[INFO] Started …` may come before it). Output with no such answer is left as it is, for the failure reading.
+        const answerAt = run.stdout.search(/^\{/m)
+
+        return answerAt < 0 ? run : { ...run, stdout: `Result:
+${run.stdout.slice(answerAt)}` }
+      }
+      const run = await within<RunRead>(start().catch((error: unknown) => ({ error })), ms, { timedOutMs: ms })
 
       return readAttempt(run, isDone)
     }

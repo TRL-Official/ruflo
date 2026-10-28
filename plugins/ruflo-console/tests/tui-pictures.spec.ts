@@ -4,10 +4,11 @@
  * and in words alone where there is no colour or no room. Run with
  *   npx vitest run plugins/ruflo-console/tests/tui-pictures.spec.ts
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { fpsOf, keyOf, runTui, type TuiIO } from '../tui/run'
 import { LOOKS, openSession } from '../tui/session'
@@ -26,9 +27,25 @@ beforeAll(() => {
     writeFileSync(join(project, path), body)
   }
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 const settle = (ms = 120) => new Promise(resolve => setTimeout(resolve, ms))
+/** Waits until `count()` stops changing for `ms` (a frame already in flight when something happened has landed), at most `limit` ms. */
+const quiet = async (count: () => number, ms = 150, limit = 3_000): Promise<void> => {
+  const end = Date.now() + limit
+  let last = -1
+
+  while (Date.now() < end && count() !== last) {
+    last = count()
+    await settle(ms)
+  }
+}
+/** Waits until `done()` holds, at most `limit` ms. */
+const until = async (done: () => boolean, limit = 5_000): Promise<void> => {
+  const end = Date.now() + limit
+
+  while (!done() && Date.now() < end) await settle(25)
+}
 const strip = (text: string) => text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '')
 
 async function opened(options: Record<string, unknown> = {}) {
@@ -175,14 +192,14 @@ describe('the loop', () => {
 
     await settle(400)
     t.press(`${ESC}[O`)
-    await settle(60)
+    await quiet(() => t.out.length) // a frame already in flight when focus was lost still lands; what follows must be silence
 
     const mark = t.out.length
 
     await settle(500)
     expect(t.out.length).toBe(mark)
     t.press(`${ESC}[I`)
-    await settle(300)
+    await until(() => t.out.length > mark)
     expect(t.out.length).toBeGreaterThan(mark)
     t.press('q')
     await running

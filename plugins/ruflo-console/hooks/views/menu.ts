@@ -8,6 +8,7 @@ import { VIEWS, type ViewId } from '../state'
 import { barParts } from './bar'
 import { art, button, clip, col, isBbs, isOrbital, row, text, THEME, type Ctx } from './common'
 import { missionStrip } from './mission-control'
+import { baseOf } from '../data/paths'
 
 type Item = { label: string; go: string }
 
@@ -52,7 +53,7 @@ export const GROUPS: readonly { title: string; sections: readonly { name: string
   },
   {
     title: 'TOOLS',
-    sections: [{ name: 'tools', items: [{ label: 'AI Terminal', go: 'terminal' }, { label: 'Automation', go: 'automate' }, { label: 'Dev Tools', go: 'devtools' }, { label: 'Plugins & Mods', go: 'plugins' }, { label: 'ADRs', go: 'adrs' }, { label: 'What’s new', go: 'whatsnew' }, { label: 'Theme Studio', go: 'themes' }, { label: 'Settings', go: 'settings' }, { label: 'Command Palette', go: 'palette' }, { label: 'Help', go: 'help' }, { label: 'Log Off', go: 'close' }] }],
+    sections: [{ name: 'tools', items: [{ label: 'AI Terminal', go: 'terminal' }, { label: 'Automation', go: 'automate' }, { label: 'Dev Tools', go: 'devtools' }, { label: 'Plugins & Mods', go: 'plugins' }, { label: 'ADRs', go: 'adrs' }, { label: 'ruRE', go: 'rure' }, { label: 'What’s new', go: 'whatsnew' }, { label: 'Theme Studio', go: 'themes' }, { label: 'Settings', go: 'settings' }, { label: 'Command Palette', go: 'palette' }, { label: 'Help', go: 'help' }, { label: 'Log Off', go: 'close' }] }],
   },
 ]
 
@@ -73,7 +74,7 @@ export function menuView(ctx: Ctx): RenderElement {
   const { state, nowMs } = ctx
   // While the entry plays (menu-entry.ts) the cards light up in turn; null once it is over, or when there is none.
   const entry = entryAge({ look: state.options.look, boot: state.options.boot, ...state.pane }, nowMs, BOOT_MIN_MS)
-  const project = state.cwd.split('/').filter(Boolean).at(-1) ?? 'ruflo'
+  const project = baseOf(state.cwd) || 'ruflo'
   const go = (item: Item) => () => (item.go === 'palette' ? ctx.act.palette('all') : item.go === 'help' ? ctx.act.help() : item.go === 'close' ? ctx.act.close() : ctx.act.view(item.go as ViewId))
   const isShown = (item: Item) => COMMANDS.has(item.go) || VIEWS.some(view => view.id === item.go)
   // Two boxes a row where the pane is wide enough, else one; each box is a group with its own border.

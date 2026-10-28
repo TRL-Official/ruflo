@@ -2,6 +2,11 @@
 
 Newest first. One `## <version> — <date>` heading per version, then `feat:`, `fix:`, `breaking:` and `chore:` bullets (ADR-478). Built from git history; older versions: `git log -- plugins/ruflo-cost-tracker`.
 
+## 0.28.3 — 2026-10-24
+- fix: `ledger.mjs`, `advise.mjs` and `local-cost.mjs` do nothing on Windows: they ran only when `import.meta.url === "file://" + argv[1]`, which is never true there (`file:///C:/…` against `C:…`), so every call exited 0 with no output. They now compare against `pathToFileURL(argv[1])`.
+- fix: `ledger.mjs --project` takes a drive-lettered path, and the project filter matches Windows paths ignoring separator style and drive-letter case, so the ruflo console's mission spend works on Windows.
+- chore: `scripts/smoke.sh` builds its root with `pwd -W` under Git Bash, so a Windows `node` can open the paths it is given (5 steps failed there before).
+
 ## 0.28.2 — 2026-10-12
 - fix: a failed Stop-hook telemetry write is logged to ~/.claude-flow/logs/cost-tracker-failures.log (capped at 512 KB, rotated to the newest 200 lines) instead of being discarded; the hook still never blocks a turn (#3227, #4078, thanks @nicholas-ruest)
 

@@ -1,6 +1,8 @@
 import type { PluginOptions, Timer } from 'claude-code'
+import { isWindowsPath, trimTrailing } from './data/paths'
 import { guardOptionsOf, type GuardOptions } from './data/wf-alerts'
 import { sessionOptionsOf, type SessionOptions } from './data/sessions-options'
+import { parseFolders, type Folders } from './data/rure-folders'
 import { convoOptionsOf, type ConvoOptions } from './data/wf-targets'
 
 import { emptyAuto, type AutoState } from './data/automate'
@@ -28,7 +30,7 @@ export type NavStyle = 'auto' | 'icons' | 'brief' | 'full'
 export const NAV_STYLES: readonly NavStyle[] = ['auto', 'icons', 'brief', 'full']
 export const NAV_KEY = 'nav-style'
 
-export type ViewId = 'menu' | 'overview' | 'swarm' | 'workflows' | 'hive' | 'claims' | 'federation' | 'plugins' | 'learning' | 'metaharness' | 'memory' | 'cost' | 'timeline' | 'approvals' | 'events' | 'room' | 'missions' | 'xruv' | 'terminal' | 'skills' | 'agent' | 'secure' | 'perf' | 'automate' | 'neural' | 'vector' | 'evolve' | 'devtools' | 'sandbox' | 'market' | 'settings' | 'themes' | 'whatsnew' | 'adrs'
+export type ViewId = 'menu' | 'overview' | 'swarm' | 'workflows' | 'hive' | 'claims' | 'federation' | 'plugins' | 'learning' | 'metaharness' | 'memory' | 'cost' | 'timeline' | 'approvals' | 'events' | 'room' | 'missions' | 'xruv' | 'terminal' | 'skills' | 'agent' | 'secure' | 'perf' | 'automate' | 'neural' | 'vector' | 'evolve' | 'devtools' | 'sandbox' | 'market' | 'settings' | 'themes' | 'whatsnew' | 'adrs' | 'rure'
 
 /**
  * The views in tab order, each with its hotkey and the inline height it asks for. Digits are the first nine; the three
@@ -72,6 +74,7 @@ export const VIEWS: readonly { id: ViewId; key: string; label: string; short: st
   { id: 'sandbox', key: '', label: 'Sandbox', short: 'Sbx', icon: '🧫', blurb: 'isolated places to try things: tmux sessions, RVF copy-on-write branches, RVM', rows: 40 },
   { id: 'market', key: 'm', label: 'Plugin Catalog', short: 'Cat', icon: '📦', blurb: 'every ruflo plugin, mod and skill: what it ships, install, enable, disable, update, view and use', rows: 50 },
   { id: 'adrs', key: '', label: 'ADRs', short: 'ADR', icon: '📐', blurb: 'your project’s Architecture Decision Records: find, propose, accept and supersede them, attach them to a mission so Claude and the swarm follow what was decided', rows: 44 },
+  { id: 'rure', key: '', label: 'ruRE', short: 'RE', icon: '🔬', blurb: 'static reverse engineering of a file in your project: a JS/Electron app, a native binary, a .NET assembly or EVM bytecode. It parses and never runs the file', rows: 40 },
   { id: 'whatsnew', key: '', label: 'What’s new', short: 'New', icon: '🆕', blurb: 'what changed in your ruflo plugins, newest first: from each plugin’s own CHANGELOG, breaking changes pinned until you dismiss them', rows: 40 },
   { id: 'themes', key: '', label: 'Theme Studio', short: 'Themes', icon: '◈', blurb: 'theme selection, color picker, animated palettes and Claude or Codex theme generator', rows: 50 },
   { id: 'settings', key: 's', label: 'Settings', short: 'Set', icon: '⚙️', blurb: 'simple to advanced settings: plugin options, ruflo config, updates, and the AI terminal’s model and budget, each edited in place', rows: 50 },
@@ -92,7 +95,16 @@ export const viewOf = (word: string): ViewId | null => {
  * `$.store` is the plugin's, not the folder's: the key carries the working directory, so a view chosen in one project
  * never follows the person into another (the ruflo-swarm leak).
  */
-export const storeKeyOf = (cwd: string): string => `ruflo-console/ui:${cwd}`
+export const storeKeyOf = (cwd: string): string => `ruflo-console/ui:${workspaceKeyOf(cwd)}`
+
+/**
+ * The working directory as a store-key part. A POSIX folder is the string itself (today's keys, byte for byte). A Windows folder (drive-lettered
+ * or a share) is one folder however it is spelled, so it is folded: lower case, `/` for `\`, no trailing separator (`c:\users\me\` and
+ * `C:\Users\me` share a key).
+ */
+function workspaceKeyOf(cwd: string): string {
+  return isWindowsPath(cwd) ? trimTrailing(cwd).replace(/\\/g, '/').toLowerCase() : cwd
+}
 
 /** How actions reach the ruflo CLI: each a fixed argv prefix. Only `npx` may download. */
 export const CLI_PREFIXES = {
@@ -122,6 +134,8 @@ export type Options = GuardOptions & ConvoOptions & SessionOptions & {
   boot: boolean
   /** ADR-474: keep the Events and Timeline history in `.claude-flow/console/` (events.jsonl, lanes.jsonl). On by default; masked text only. */
   eventsPersist: boolean
+  /** ADR-499: outside folders ruRE may read, alias -> absolute folder. Set only by the person (a plugin option); empty by default. */
+  rureFolders: Folders
 }
 
 const num = (value: unknown, fallback: number, lo: number, hi: number): number => {
@@ -144,6 +158,7 @@ export function optionsOf(raw: PluginOptions | undefined): Options {
     look: value.look === 'plain' || value.look === 'orbital' ? value.look : 'bbs',
     boot: value.boot !== false,
     eventsPersist: value.eventsPersist !== false && value.eventsPersist !== 'false',
+    rureFolders: parseFolders(value.rureFolders),
     ...guardOptionsOf(raw),
     ...convoOptionsOf(raw),
     ...sessionOptionsOf(raw),
@@ -171,10 +186,10 @@ export type TermLine = { kind: 'in' | 'head' | 'out' | 'err' | 'sys' | 'tool' | 
 /** A conversation kept per project: codex's thread id, claude's session id, so a follow-up resumes it. */
 export type TermSessions = { codex?: string; claude?: string }
 
-export const termStoreKeyOf = (cwd: string): string => `ruflo-console/term:${cwd}`
+export const termStoreKeyOf = (cwd: string): string => `ruflo-console/term:${workspaceKeyOf(cwd)}`
 
 /** What an action did: what ran, how it exited, whether the disk shows the change, and anything it printed to show. */
-export type Outcome = { label: string; ok: boolean; verified: 'yes' | 'no' | 'n/a'; detail: string; atMs: number; lines?: string[]; /** A confirm card that nobody answered within PENDING_TTL_MS and was cleared unrun (the Room shows it briefly). */ expired?: boolean }
+export type Outcome = { label: string; ok: boolean; verified: 'yes' | 'no' | 'n/a'; detail: string; atMs: number; lines?: string[]; /** Sent but not answered yet (a slash command waits for the turn to end): Claude's tools say Queued, not Done. */ queued?: boolean; /** A confirm card that nobody answered within PENDING_TTL_MS and was cleared unrun (the Room shows it briefly). */ expired?: boolean }
 
 /** One module seen registering since the console loaded, as the engine's scan named it. */
 export type ModSeen = { name: string; provenance: string; isLoaded: boolean; reason?: string; atMs: number }

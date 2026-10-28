@@ -21,6 +21,8 @@ export interface HandshakeResult {
   readonly success: boolean;
   readonly session?: FederationSession;
   readonly error?: string;
+  /** The peer answered with the key pinned for its node id. False means the key was only claimed. */
+  readonly pinned?: boolean;
 }
 
 export interface HandshakeServiceDeps {
@@ -29,6 +31,8 @@ export interface HandshakeServiceDeps {
   generateNonce: () => string;
   signChallenge: (nonce: string) => Promise<string>;
   verifySignature: (nonce: string, signature: string, publicKey: string) => Promise<boolean>;
+  /** The Ed25519 key (hex) the operator pinned for a node id. Without a pin, a handshake proves nothing about who answered. */
+  pinnedKeyFor?: (nodeId: string) => string | undefined;
   getLocalNodeId: () => string;
   getLocalPublicKey: () => string;
   getLocalCapabilities: () => readonly string[];
@@ -99,9 +103,23 @@ export class HandshakeService {
       return { success: false, error: 'Unknown or expired challenge' };
     }
 
+    // A response answers one challenge, issued to one node: it cannot be replayed by another.
+    if (pending.challenge.targetNodeId !== remoteNode.nodeId) {
+      this.pendingChallenges.delete(response.challengeId);
+      return { success: false, error: 'Response is not from the node that was challenged' };
+    }
+
     if (Date.now() > pending.expiresAt) {
       this.pendingChallenges.delete(response.challengeId);
       return { success: false, error: 'Challenge expired' };
+    }
+
+    // The response carries its own key, so a valid signature only proves possession of that key.
+    // Identity comes from the key the operator pinned for this node id.
+    const pinned = this.deps.pinnedKeyFor?.(remoteNode.nodeId);
+    if (pinned !== undefined && pinned.toLowerCase() !== response.publicKey.toLowerCase()) {
+      this.pendingChallenges.delete(response.challengeId);
+      return { success: false, error: 'Peer key does not match the pinned key' };
     }
 
     const isValid = await this.deps.verifySignature(
@@ -126,7 +144,7 @@ export class HandshakeService {
       sessionId: this.deps.generateSessionId(),
       localNodeId: this.deps.getLocalNodeId(),
       remoteNodeId: remoteNode.nodeId,
-      trustLevel: TrustLevel.ATTESTED,
+      trustLevel: pinned !== undefined ? TrustLevel.ATTESTED : TrustLevel.UNTRUSTED,
       negotiatedCapabilities,
       createdAt: now,
       expiresAt: new Date(now.getTime() + this.config.sessionTtlMs),
@@ -135,10 +153,10 @@ export class HandshakeService {
       metrics: FederationSession.createMetrics(),
     });
 
-    remoteNode.updateTrustLevel(TrustLevel.ATTESTED);
+    if (pinned !== undefined) remoteNode.updateTrustLevel(TrustLevel.ATTESTED);
     remoteNode.markSeen();
 
-    return { success: true, session };
+    return { success: true, session, pinned: pinned !== undefined };
   }
 
   /**

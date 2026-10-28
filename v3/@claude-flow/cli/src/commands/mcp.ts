@@ -19,6 +19,8 @@ import {
   getMCPServerStatus,
   type MCPServerOptions,
   resolveMcpHttpAuthToken,
+  ensureDefaultMcpToken,
+  isUnauthenticatedHttpAllowed,
   isLoopbackHost,
   type MCPServerStatus,
   filterAdvertisedMcpTools,
@@ -206,6 +208,13 @@ const startCommand: Command = {
       output.printError((error as Error).message);
       return { success: false, exitCode: 1 };
     }
+    // Network transports never start open by default: with no token given, use the per-user one.
+    let defaultTokenFile: string | undefined;
+    if (!authToken && (transport === 'http' || transport === 'websocket') && !isUnauthenticatedHttpAllowed()) {
+      const made = ensureDefaultMcpToken();
+      authToken = made.token;
+      defaultTokenFile = made.file;
+    }
     const daemon = (ctx.flags.daemon as boolean) ?? false;
     const force = (ctx.flags.force as boolean) ?? false;
 
@@ -334,6 +343,7 @@ const startCommand: Command = {
         output.writeln(output.dim(`  RPC: http://${host}:${port}/rpc`));
         if (authToken) {
           output.writeln(output.dim('  Auth: bearer token required (Authorization: Bearer <token>); /health is public'));
+          if (defaultTokenFile) output.writeln(output.dim(`  Token (none was given): ${defaultTokenFile} - set RUFLO_MCP_ALLOW_UNAUTHENTICATED_HTTP=1 to run without one`));
         } else if (isLoopbackHost(host)) {
           output.printWarning('No auth token set: any local process (and DNS-rebinding web pages) can call tools. Set RUFLO_MCP_HTTP_TOKEN to require a bearer token.');
         } else {
@@ -341,6 +351,7 @@ const startCommand: Command = {
         }
       } else if (transport === 'websocket') {
         output.writeln(output.dim(`  WebSocket: ws://${host}:${port}/ws`));
+        if (authToken) output.writeln(output.dim(`  Auth: bearer token required (Authorization: Bearer <token> or ?token=)${defaultTokenFile ? `; token in ${defaultTokenFile}` : ''}`));
       }
 
       if (daemon) {

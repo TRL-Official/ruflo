@@ -2957,6 +2957,7 @@ const workerStatusCommand: Command = {
         }>;
         summary?: {
           total: number;
+          pending: number;
           running: number;
           completed: number;
           failed: number;
@@ -3013,7 +3014,7 @@ const workerStatusCommand: Command = {
 
         if (result.summary) {
           output.writeln();
-          output.writeln(`Total: ${result.summary.total} | Running: ${output.highlight(String(result.summary.running))} | Completed: ${output.success(String(result.summary.completed))} | Failed: ${output.error(String(result.summary.failed))}`);
+          output.writeln(`Total: ${result.summary.total} | Pending: ${String(result.summary.pending ?? 0)} | Running: ${output.highlight(String(result.summary.running))} | Completed: ${output.success(String(result.summary.completed))} | Failed: ${output.error(String(result.summary.failed))}`);
         }
       } else {
         output.writeln();

@@ -2,6 +2,7 @@ import type { EngineInterface, On } from 'claude-code'
 import type { GuidanceHooks } from './guidance'
 
 import { detectBrain } from './grounding'
+import { hasRure } from './rure-offer'
 import { versionText } from './probe'
 import { HANDSHAKE_MARKER, ownedEvents } from './ownership'
 import type { ModOptions } from './options'
@@ -117,6 +118,7 @@ export function registerSession(on: On, state: ModState, options: ModOptions, gu
     state.statusLine = options.statusLine && !hasClassicStatusLine(settings)
     if (state.probe.enabled) state.probe.version = versionText(await $.session.version().catch(() => undefined))
     if (state.grounding.enabled) state.grounding.status = await detectGrounding($, settings)
+    if (state.rureOffer.enabled) state.rureOffer.available = await $.tool.list().then(hasRure, () => false)
     guidance?.start()
     redraw(state)
     await $.command

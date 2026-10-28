@@ -3,10 +3,11 @@
  * be drawn on a host with no Claude session and no mouse. Real ruflo files on disk, an injected terminal, no engine.
  *   npx vitest run plugins/ruflo-console/tests/tui-nav.spec.ts
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { widthOf } from '../tui/ansi'
 import { keyLine, keyOf, MIN_COLUMNS, navLine, runTui, type TuiIO } from '../tui/run'
@@ -41,7 +42,7 @@ beforeAll(() => {
     }),
   })
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 function terminal(columns = 100, rows = 30) {
   const out: string[] = []

@@ -276,6 +276,43 @@ describe('style, numbering and the records written', () => {
     }
   })
 
+  it('a record checked out with CRLF line endings (git autocrlf on Windows) takes the same edit and keeps its CRLF', () => {
+    const cases: [string, string, string, 'accepted' | 'deprecated'][] = [
+      ['madr', 'docs/decisions', '0001-use-markdown-architectural-decision-records.md', 'deprecated'],
+      ['nygard', 'doc/adr', '0003-use-graphql.md', 'deprecated'],
+      ['ruflo-style', 'docs/adrs', 'ADR-002-retries.md', 'accepted'],
+    ]
+
+    for (const [name, folder, target, to] of cases) {
+      const lf = readFileSync(join(FIXTURES, name, folder, target), 'utf8').replace(/\r\n/g, '\n')
+      const crlf = lf.replace(/\n/g, '\r\n')
+      const style = detectStyle(docsOf(name, folder))
+      const expected = withStatus(lf, parseAdr(target, lf), style, to)
+      const edit = withStatus(crlf, parseAdr(target, crlf), style, to)
+
+      expect(edit.ok, name).toBe(true)
+      if (!edit.ok || !expected.ok) continue
+
+      expect(edit.text.replace(/\r\n/g, '\n'), name).toBe(expected.text)
+      expect(edit.text.replace(/\r\n/g, ''), name).not.toContain('\n')
+      expect(parseAdr(target, edit.text).status, name).toBe(to)
+    }
+  })
+
+  it('supersede keeps a CRLF record’s line endings, and a MADR record with CRLF front matter is not "not closed"', () => {
+    const style = detectStyle(docsOf('madr', 'docs/decisions'))
+    const lf = renderNew(style, { number: 4, title: 'X', date: TODAY })
+    const crlf = lf.replace(/\n/g, '\r\n')
+    const newer = parseAdr('0004-x.md', crlf)
+    const linked = withSupersedes(crlf, newer, style, { number: 1, title: 'Old', file: '0001-old.md' })
+    const status = withStatus(crlf, newer, style, 'accepted')
+
+    expect(linked.ok && linked.text.replace(/\r\n/g, '')).not.toContain('\n')
+    expect(linked.ok && linked.text).toContain('supersedes: ')
+    expect(status).toMatchObject({ ok: true })
+    expect(status.ok && status.text.replace(/\r\n/g, '')).not.toContain('\n')
+  })
+
   it('supersede edits the old record’s status and adds the link to the new one; a record with no status gets a status line', () => {
     const style = detectStyle(docsOf('nygard', 'doc/adr'))
     const old = parseAdr('0001-record-architecture-decisions.md', readFileSync(join(FIXTURES, 'nygard', 'doc/adr', '0001-record-architecture-decisions.md'), 'utf8'))

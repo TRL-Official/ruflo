@@ -50,6 +50,24 @@ const PUBLIC_PAGES = {
 // truth; read it rather than keeping a fourth copy in sync by hand.
 export const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
+/**
+ * MCP makes `params.arguments` optional on tools/call, and clients commonly omit it for tools that take
+ * none. The SDK validates the missing value against an object schema and answers -32602 ("expected
+ * object, received undefined"), so a freshly registered connector failed its first no-argument call.
+ * Treat an absent or null `arguments` as `{}`; anything the client did send is left untouched.
+ * Handles a JSON-RPC batch too. Mutates in place and returns the message(s).
+ */
+export function normaliseToolCallArguments(parsed) {
+  for (const msg of Array.isArray(parsed) ? parsed : [parsed]) {
+    if (msg && typeof msg === 'object' && msg.method === 'tools/call'
+      && msg.params && typeof msg.params === 'object' && !Array.isArray(msg.params)
+      && (msg.params.arguments === undefined || msg.params.arguments === null)) {
+      msg.params.arguments = {};
+    }
+  }
+  return parsed;
+}
+
 export function createGateway({ relay, keyFile, port, registration, github: githubOverride } = {}) {
   const RELAY = relay || process.env.RUFLO_RELAY_URL || 'wss://relay.ruv.io';
   const HTTP_BASE = RELAY.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
@@ -489,14 +507,17 @@ export function createGateway({ relay, keyFile, port, registration, github: gith
     // service-side callers depend on. /chatgpt/mcp and /claude/mcp are isolated
     // directory-safe profiles: no membership administration and no
     // secret-bearing input field.
-    if (url.pathname === '/mcp' || url.pathname === '/chatgpt/mcp' || url.pathname === '/claude/mcp') {
-      const review = url.pathname === '/chatgpt/mcp' || url.pathname === '/claude/mcp';
+    // POST on the bare host: connector UIs are routinely given `https://x.ruv.io` without the /mcp path.
+    // Serve the directory-safe profile there instead of a 404 (the 401 challenge points at root metadata).
+    const bareHostPost = req.method === 'POST' && url.pathname === '/';
+    if (url.pathname === '/mcp' || url.pathname === '/chatgpt/mcp' || url.pathname === '/claude/mcp' || bareHostPost) {
+      const review = url.pathname !== '/mcp';
       if (rateLimited(req)) return res.writeHead(429, { 'content-type': 'application/json' }).end('{"error":"rate limited"}');
       const auth = await oauthContext(req);
       try {
         const sub = auth.subject ? createHash('sha256').update(auth.subject).digest('hex').slice(0, 12) : '-';
         console.log(`mcp path=${url.pathname} auth=${auth.mode} scopes=${(auth.scopes || []).join('+') || '-'} sub=${sub}`
-          + (auth.mode === 'denied' ? ` reason=${auth.error} aud=${auth.observedAudience || '-'}` : ''));
+          + (auth.mode === 'denied' ? ` reason=${auth.error} aud=${auth.observedAudience || '-'} why="${String(auth.description || '-').replace(/[^A-Za-z0-9 ,.:()_-]/g, '?').slice(0, 160)}"` : ''));
       } catch { /* diagnostic logging must never break a request */ }
       if (auth.mode === 'denied') {
         const { error, description } = auth;
@@ -509,6 +530,16 @@ export function createGateway({ relay, keyFile, port, registration, github: gith
       // Reads remain public. A write attempted through either directory profile must
       // receive an HTTP challenge, not a model-level 200 error that an OAuth
       // client cannot use to discover the authorization server.
+      normaliseToolCallArguments(parsed);
+      const rejectedAs = (res) => res.on('finish', () => {
+        if (res.statusCode < 400) return;
+        try {
+          const m = (x) => String(x ?? '-').replace(/[^A-Za-z0-9/_.:-]/g, '?').slice(0, 64);
+          console.log(`mcp-reject path=${url.pathname} status=${res.statusCode} rpc=${m(Array.isArray(parsed) ? 'batch' : parsed?.method)}`
+            + ` proto=${m(req.headers['mcp-protocol-version'])} ua=${m(String(req.headers['user-agent'] || '').split(' ')[0])}`);
+        } catch { /* diagnostic logging must never break a request */ }
+      });
+      rejectedAs(res);
       const calledTool = parsed?.method === 'tools/call' ? parsed?.params?.name : undefined;
       if (review && auth.mode === 'anonymous' && OAUTH_WRITE_TOOLS.has(calledTool)) {
         const error = 'invalid_request';

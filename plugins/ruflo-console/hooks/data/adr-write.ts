@@ -145,6 +145,24 @@ export function initialRecord(style: Style, date: string): { file: string; text:
 
 export type Edit = { ok: true; text: string } | { ok: false; why: string }
 
+/**
+ * A record with CRLF line endings (git's autocrlf on Windows) is edited as LF text and written back with CRLF: the front-matter and
+ * line checks below compare whole lines, so a trailing carriage return made a MADR record "not closed" and left mixed endings elsewhere.
+ */
+function keepLineEnds(text: string, edit: (lf: string) => Edit): Edit {
+  if (!text.includes('\r\n')) return edit(text)
+
+  const done = edit(text.replace(/\r\n/g, '\n'))
+
+  return done.ok ? { ok: true, text: done.text.replace(/\n/g, '\r\n') } : done
+}
+
+/** The record with its status changed to `to`: one line replaced where the record has a status, one inserted where it has none. */
+export const withStatus = (text: string, doc: AdrDoc, style: Style, to: AdrStatus, by: { number: number; title: string; file: string } | null = null): Edit => keepLineEnds(text, lf => statusIn(lf, doc, style, to, by))
+
+/** The newer record names what it replaces: a `Supersedes` line after its status (or title), unless it already says so. */
+export const withSupersedes = (text: string, doc: AdrDoc, style: Style, old: { number: number; title: string; file: string }): Edit => keepLineEnds(text, lf => supersedesIn(lf, doc, style, old))
+
 const lineIndexOf = (lines: readonly string[], test: (line: string) => boolean): number => lines.findIndex(test)
 
 const INLINE_STATUS = /^(\s*(?:[-*]\s*)?\**\s*status\s*\**\s*:\s*\**\s*)(.*?)(\**\s*)$/i
@@ -160,7 +178,7 @@ export function statusText(style: Style, to: AdrStatus, by: { number: number; ti
 }
 
 /** The record with its status changed to `to`: one line replaced where the record has a status, one inserted where it has none. */
-export function withStatus(text: string, doc: AdrDoc, style: Style, to: AdrStatus, by: { number: number; title: string; file: string } | null = null): Edit {
+function statusIn(text: string, doc: AdrDoc, style: Style, to: AdrStatus, by: { number: number; title: string; file: string } | null): Edit {
   if (to === 'unknown') return { ok: false, why: 'unknown is not a status to set' }
   if (to === 'superseded' && by === null) return { ok: false, why: 'superseded needs the record that supersedes it' }
 
@@ -215,7 +233,7 @@ export function withStatus(text: string, doc: AdrDoc, style: Style, to: AdrStatu
 }
 
 /** The newer record names what it replaces: a `Supersedes` line after its status (or title), unless it already says so. */
-export function withSupersedes(text: string, doc: AdrDoc, style: Style, old: { number: number; title: string; file: string }): Edit {
+function supersedesIn(text: string, doc: AdrDoc, style: Style, old: { number: number; title: string; file: string }): Edit {
   if (doc.supersedes.includes(old.number)) return { ok: true, text }
 
   const lines = text.split('\n')

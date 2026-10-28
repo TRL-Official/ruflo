@@ -11,7 +11,18 @@ import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const walk = (dir: string): string[] => readdirSync(dir).flatMap(name => (statSync(join(dir, name)).isDirectory() ? walk(join(dir, name)) : name.endsWith('.ts') ? [join(dir, name)] : []))
+// `.mut-*.ts` are the mutation specs' temporary copies of hooks modules, made and deleted while other specs run in parallel: they are not part of hooks/, and a
+// listed one can be gone before it is stat'ed or read.
+const walk = (dir: string): string[] =>
+  readdirSync(dir).flatMap(name => {
+    if (name.startsWith('.mut-')) return []
+
+    try {
+      return statSync(join(dir, name)).isDirectory() ? walk(join(dir, name)) : name.endsWith('.ts') ? [join(dir, name)] : []
+    } catch {
+      return []
+    }
+  })
 const bare = (file: string): string => readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
 /** Every `import … from 'x'` / `export … from 'x'` statement as [is it type-only, the specifier]; a statement cannot cross a quote, so none runs into the next. */
 const importsOf = (text: string): Array<[boolean, string]> => [...text.matchAll(/^(import|export)\b([^'";]*?)from\s+'([^']+)'/gm)].map(match => [/^\s*type\b/.test(match[2] ?? ''), match[3] as string])
@@ -32,6 +43,10 @@ describe('hooks/ is host-neutral', () => {
     const offenders = hooks.filter(({ text }) => importsOf(text).some(([isType, from]) => !isType && !from.startsWith('.')) || /\bimport\(\s*'(?![./])/.test(text) || /\brequire\(/.test(text)).map(({ file }) => file)
 
     expect(offenders).toEqual([])
+  })
+
+  it('names every environment variable it reads or writes with a literal: the engine lists them, and `claude plugin validate` refuses a computed name (the mod then does not load)', () => {
+    expect(hooks.filter(({ text }) => /\$\.env\.(get|set)\(\s*(?!['"])/.test(text)).map(({ file }) => file)).toEqual([])
   })
 
   it('reaches the engine only from register.ts and model-tools.ts', () => {

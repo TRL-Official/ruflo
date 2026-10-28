@@ -55,11 +55,12 @@ describe('which flavor, and when', () => {
     expect(asked).toEqual([['uname', '-s']])
   })
 
-  it('without an answer, the engine platform decides: darwin and the BSDs posix, everything else gnu', () => {
+  it('without an answer, the engine platform decides: darwin and the BSDs posix, Windows host-fs, everything else gnu', () => {
     for (const platform of ['darwin', 'freebsd', 'openbsd', 'netbsd']) expect(flavorOfPlatform(platform), platform).toBe('posix')
-    for (const platform of ['linux', 'win32', 'aix', null, 42]) expect(flavorOfPlatform(platform), String(platform)).toBe('gnu')
+    for (const platform of ['linux', 'aix', null, 42]) expect(flavorOfPlatform(platform), String(platform)).toBe('gnu')
+    expect(flavorOfPlatform('win32')).toBe('host-fs')
     // In this test process the default reads Node's own process.platform.
-    expect(flavorOfPlatform()).toBe(process.platform === 'darwin' || process.platform.endsWith('bsd') ? 'posix' : 'gnu')
+    expect(flavorOfPlatform()).toBe(process.platform === 'win32' ? 'host-fs' : process.platform === 'darwin' || process.platform.endsWith('bsd') ? 'posix' : 'gnu')
   })
 
   it.each([
@@ -185,7 +186,8 @@ describe('the POSIX argv (macOS, BSD): a fixed set of constant scripts, the path
   })
 })
 
-describe('the POSIX scripts on a real disk (sh and dd as this machine has them)', () => {
+// Windows writes through the host file API (host-fs), never these scripts; NTFS has no mode bits or FIFOs to check them against.
+describe.skipIf(process.platform === 'win32')('the POSIX scripts on a real disk (sh and dd as this machine has them)', () => {
   let dir = ''
 
   afterEach(() => {

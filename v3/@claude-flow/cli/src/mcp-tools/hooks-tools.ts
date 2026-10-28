@@ -5100,6 +5100,7 @@ export const hooksWorkerStatus: MCPTool = {
       workers,
       summary: {
         total: workers.length,
+        pending: workers.filter(w => w.status === 'pending').length,
         running: workers.filter(w => w.status === 'running').length,
         completed: workers.filter(w => w.status === 'completed').length,
         failed: workers.filter(w => w.status === 'failed').length,

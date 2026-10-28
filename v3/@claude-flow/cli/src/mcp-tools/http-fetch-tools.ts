@@ -15,7 +15,7 @@
  *   - DEFAULT-REFUSES Authorization / Cookie / X-Auth-* (CLAUDE_FLOW_HTTP_FETCH_ALLOW_AUTH=1 opt-in)
  *   - hard timeout 30s default, 60s ceiling
  *   - response truncated to 256KB default, 1MB ceiling
- *   - no redirects auto-followed beyond fetch's default; status reported as-is
+ *   - redirects followed manually, max 10, every hop re-validated by the same allowlist
  *
  * @module @claude-flow/cli/mcp-tools/http-fetch
  */
@@ -26,6 +26,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024; // 256 KB
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB
+const MAX_REDIRECTS = 10;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const DEFAULT_USER_AGENT = 'ruflo-http-fetch/1.0';
 
 const FORBIDDEN_HEADER_PREFIXES = ['x-auth-', 'x-api-key'] as const;
@@ -70,10 +72,35 @@ export function validateUrl(rawUrl: string): URL {
 
 function isPrivateOrLoopback(host: string): boolean {
   if (host === 'localhost' || host === 'localhost.localdomain') return true;
-  // IPv6 loopback
-  if (host === '::1' || host === '[::1]') return true;
+
+  // Node's URL parser keeps brackets in `.hostname` for every IPv6 literal
+  // (e.g. "[::1]", "[fc00::1]", "[::ffff:7f00:1]"). Strip them once so every
+  // check below operates on the bare address — without this, the fc00::/7
+  // and fe80::/10 checks further down never match anything (they test
+  // `startsWith('fc'/'fe80:')` against a string starting with "["), and an
+  // IPv4-mapped-IPv6 literal (`::ffff:a.b.c.d`, which Node normalizes to a
+  // canonical `::ffff:xxxx:yyyy` hex form) sails through both the IPv4 and
+  // IPv6 branches untested — a live SSRF bypass (e.g. `::ffff:127.0.0.1` or
+  // `::ffff:169.254.169.254` reaching loopback / cloud-metadata targets).
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+
+  if (bare === '::1') return true; // IPv6 loopback
+
+  // IPv4-mapped IPv6 — decode back to dotted-decimal and recurse into the
+  // IPv4 check below so it inherits every existing private/loopback/
+  // link-local/CGNAT rule instead of needing its own copy.
+  const mappedHex = bare.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) {
+    const hi = parseInt(mappedHex[1], 16);
+    const lo = parseInt(mappedHex[2], 16);
+    const decoded = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    return isPrivateOrLoopback(decoded);
+  }
+  const mappedDecimal = bare.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mappedDecimal) return isPrivateOrLoopback(mappedDecimal[1]);
+
   // IPv4 numeric checks
-  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  const m = bare.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (m) {
     const a = Number(m[1]);
     const b = Number(m[2]);
@@ -86,10 +113,16 @@ function isPrivateOrLoopback(host: string): boolean {
     if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
     return false;
   }
-  // IPv6 bracketed addresses and other special forms — be conservative and
-  // accept only public-looking literals. Reject obvious private/local forms.
-  if (host.startsWith('fc') || host.startsWith('fd')) return true;  // fc00::/7 ULA
-  if (host.startsWith('fe80:')) return true;                        // link-local
+  // IPv6 special forms — be conservative and accept only public-looking
+  // literals. Reject obvious private/local forms.
+  if (bare.startsWith('fc') || bare.startsWith('fd')) return true;  // fc00::/7 ULA
+  if (bare.startsWith('fe80:')) return true;                        // link-local
+  // KNOWN LIMITATION (pre-existing, not introduced by the bracket-stripping /
+  // IPv4-mapped-IPv6 fix above; flagged by an independent adversarial review):
+  // `::` (IPv6 unspecified/"any", the analog of 0.0.0.0, which the IPv4 branch
+  // above does block), IPv6 multicast (ff00::/8), and NAT64 (64:ff9b::/96) are
+  // not covered. Left as a follow-up hardening item rather than scope-creeping
+  // this patch.
   return false;
 }
 
@@ -233,13 +266,96 @@ export async function httpFetchExecute(input: Record<string, unknown>): Promise<
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(parsed.toString(), {
-      method,
-      headers,
-      body: method === 'GET' || method === 'HEAD' ? undefined : body,
-      signal: controller.signal,
-      // Keep redirect default ('follow') — caller sees final status/url.
-    });
+    let currentUrl = parsed;
+    let currentMethod = method;
+    let currentBody = body;
+    let response: Response;
+    let redirects = 0;
+
+    // Do not let fetch follow redirects on its own: only the initial URL was
+    // validated, so an automatic follow could reach loopback/RFC1918 or switch
+    // protocols after passing the allowlist. Every hop is validated with the
+    // same rules; sensitive headers are dropped when the origin changes.
+    while (true) {
+      response = await fetch(currentUrl.toString(), {
+        method: currentMethod,
+        headers,
+        body: currentMethod === 'GET' || currentMethod === 'HEAD' ? undefined : currentBody,
+        signal: controller.signal,
+        redirect: 'manual',
+      });
+
+      if (!REDIRECT_STATUSES.has(response.status)) break;
+
+      const location = response.headers.get('location');
+      if (!location) break;
+
+      if (redirects++ >= MAX_REDIRECTS) {
+        try { await response.body?.cancel(); } catch { /* ignore */ }
+        return {
+          success: false,
+          status: response.status,
+          statusText: response.statusText,
+          headers: {},
+          body: '',
+          bodyTruncated: false,
+          bytesRead: 0,
+          durationMs: Date.now() - startedAt,
+          url: currentUrl.toString(),
+          method,
+          error: `too many redirects (max ${MAX_REDIRECTS})`,
+          errorCode: 'REDIRECT_LIMIT',
+        };
+      }
+
+      let nextUrl: URL;
+      try {
+        nextUrl = validateUrl(new URL(location, currentUrl).toString());
+      } catch (e) {
+        try { await response.body?.cancel(); } catch { /* ignore */ }
+        const err = e as HttpFetchValidationError;
+        return {
+          success: false,
+          status: response.status,
+          statusText: response.statusText,
+          headers: {},
+          body: '',
+          bodyTruncated: false,
+          bytesRead: 0,
+          durationMs: Date.now() - startedAt,
+          url: currentUrl.toString(),
+          method,
+          error: `redirect blocked: ${err.message}`,
+          errorCode: err.code ?? 'REDIRECT_BLOCKED',
+        };
+      }
+
+      // The redirect response body is not returned; release the connection
+      // before issuing the next request. A body-less 3xx is also fine.
+      try { await response.body?.cancel(); } catch { /* ignore */ }
+
+      if (nextUrl.origin !== currentUrl.origin) {
+        for (const key of Object.keys(headers)) {
+          const lower = key.toLowerCase();
+          if (lower === 'authorization' || lower === 'cookie' || lower === 'proxy-authorization') {
+            delete headers[key];
+          }
+        }
+      }
+
+      // Match fetch's redirect method rules: 303 becomes GET except for
+      // GET/HEAD, while 301/302 only rewrite POST to GET. 307/308 preserve
+      // both method and body.
+      if (
+        (response.status === 303 && currentMethod !== 'GET' && currentMethod !== 'HEAD') ||
+        ((response.status === 301 || response.status === 302) && currentMethod === 'POST')
+      ) {
+        currentMethod = 'GET';
+        currentBody = undefined;
+      }
+
+      currentUrl = nextUrl;
+    }
 
     // Drain the body with byte budget. Use array-buffer first to bound size
     // deterministically before decoding to UTF-8.
@@ -287,7 +403,7 @@ export async function httpFetchExecute(input: Record<string, unknown>): Promise<
       bodyTruncated,
       bytesRead,
       durationMs: Date.now() - startedAt,
-      url: parsed.toString(),
+      url: currentUrl.toString(),
       method,
     };
   } catch (e) {

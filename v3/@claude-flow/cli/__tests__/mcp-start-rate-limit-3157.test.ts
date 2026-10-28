@@ -27,6 +27,8 @@ vi.mock('../src/mcp-server.js', () => ({
   filterAdvertisedMcpTools: (tools: unknown[]) => tools,
   parseMcpToolSelection: () => 'all',
   resolveMcpHttpAuthToken: () => undefined,
+  ensureDefaultMcpToken: () => ({ token: 'x'.repeat(32), file: '/nowhere' }),
+  isUnauthenticatedHttpAllowed: (env: NodeJS.ProcessEnv = process.env) => env.RUFLO_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1',
 }));
 
 vi.mock('../src/mcp-client.js', () => ({
@@ -60,6 +62,7 @@ describe('mcp start rate limit options (#3157)', () => {
     start.action!({ args: [], flags, interactive: false } as never);
 
   beforeEach(() => {
+    vi.stubEnv("RUFLO_MCP_ALLOW_UNAUTHENTICATED_HTTP", "1"); // these cases are about rate limits, not the default token
     h.manager.start.mockReset().mockImplementation(() => new Promise(() => {}));
     h.getServerManager.mockReset().mockReturnValue(h.manager);
   });

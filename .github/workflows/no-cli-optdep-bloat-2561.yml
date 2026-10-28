@@ -76,8 +76,17 @@ jobs:
             // scripts/metaharness-clean-install-test.mjs, which CI runs on
             // every PR touching these pins). Removed per the guard escape
             // clause documented above; the rest of the list stands.
+            // NOTE: "@claude-flow/aidefence" was on this list as a precaution; the
+            // published package has ZERO dependencies (agentdb is an optional
+            // peer, which npm does not install), no lifecycle scripts, and
+            // is ~150 KB installed. Measured 2026-10-27: cold npm install into
+            // an empty dir with an empty cache took 2.3-3.1 s (all registry
+            // round-trip) and added one package, versus 139 s / 377 packages for
+            // a cold install of @claude-flow/cli itself. It is declared so
+            // the aidefence_* tools resolve under the pnpm isolated layout (#4445).
+            // Removed per the guard escape clause documented above; the rest
+            // of the list stands.
             const FORBIDDEN = [
-              "@claude-flow/aidefence",
               "@claude-flow/codex",
               "@claude-flow/embeddings",
               "@claude-flow/guidance",

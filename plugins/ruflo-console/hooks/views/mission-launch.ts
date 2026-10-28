@@ -1,6 +1,6 @@
 import type { RenderElement } from 'claude-code'
 
-import { activeMission, derive, mcOf, nextTask, progressOf } from '../mission-control'
+import { derive, mcOf, missionOfGoal, nextTask, progressOf } from '../mission-control'
 import { blocksCreate, blocksGuidance, capabilitiesOf, PLUGIN_NOTES } from '../mission-options'
 import { settingsOf } from '../settings'
 import { clip, col, confirmHere, paragraph, row, section, text, THEME, type Ctx } from './common'
@@ -16,7 +16,8 @@ export function launchSteps(ctx: Ctx): Step[] {
   const { state } = ctx
   const mc = mcOf(state)
   const m = ctx.act.mission
-  const mission = activeMission(state)
+  // The mission this goal belongs to: none when the active one is over and the goal is a new one (it needs its own create).
+  const mission = missionOfGoal(state)
   const tasks = state.snapshot?.tasks ?? []
   const planned = mc.planned !== null
   const guidance = mc.guidance

@@ -982,8 +982,17 @@ export class UnifiedSwarmCoordinator extends EventEmitter implements IUnifiedSwa
         agent.currentTask = undefined;
         agent.status = 'idle';
 
-        // Re-assign
-        this.assignTask(task);
+        // Re-assign. The failed agent is idle now, so assignTask() may hand
+        // the retry back to this same agent (keep its pool reservation) or to
+        // a different available agent. In the latter case the original domain
+        // reservation must be released, or that pool slot stays busy forever.
+        void this.assignTask(task).then(nextAgent => {
+          if (nextAgent?.id.id !== agentId) {
+            void this.releaseDomainAgent(agentId);
+          }
+        }).catch(() => {
+          void this.releaseDomainAgent(agentId);
+        });
       } else {
         task.status = 'failed';
         agent.status = 'idle';
@@ -1078,6 +1087,11 @@ export class UnifiedSwarmCoordinator extends EventEmitter implements IUnifiedSwa
     agent.currentTask = undefined;
     agent.health = 1.0;
     agent.lastHeartbeat = new Date();
+
+    // Domain-pool ownership is separate from AgentState.status. Without this
+    // release the recovered agent stays in AgentPool.busy forever and queued
+    // domain tasks never drain, even though the shared state says idle.
+    await this.releaseDomainAgent(agentId);
   }
 
   private performHealthChecks(): void {

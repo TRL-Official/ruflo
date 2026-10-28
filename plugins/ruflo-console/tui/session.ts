@@ -120,7 +120,10 @@ export function openSession(options: SessionOptions, host?: Host): Session {
   let cardFits = false
   let isMoving = false
 
-  const ready = Promise.all([node.home().then(home => void (state.home = home ?? null), () => undefined), node.configDir().then(dir => void (state.configDir = dir ?? null), () => undefined)])
+  // The config folder is $CLAUDE_CONFIG_DIR, else <home>/.claude, as in the engine (register.ts); with neither known the plugin, marketplace and run reads have nowhere to look.
+  const ready = Promise.all([node.home().then(home => void (state.home = home ?? null), () => undefined), node.configDir().then(dir => void (state.configDir = dir ?? null), () => undefined)]).then(() => {
+    if (state.configDir === null && state.home !== null) state.configDir = `${state.home}/.claude`
+  })
 
   return {
     state,

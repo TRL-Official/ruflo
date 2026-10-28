@@ -3,10 +3,11 @@
  * main-menu keys, Back and the mouse reach them. Run with
  *   npx vitest run plugins/ruflo-console/tests/tui-parity.spec.ts
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { VIEWS } from '../hooks/state'
 import { navHit, navLine, runTui, type TuiIO } from '../tui/run'
@@ -27,7 +28,7 @@ beforeAll(() => {
     writeFileSync(join(project, path), body)
   }
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 const settle = (ms = 150) => new Promise(resolve => setTimeout(resolve, ms))
 const strip = (text: string) => text.replace(/\u001b\[[0-9;?<]*[A-Za-z]/g, '')

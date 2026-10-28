@@ -73,13 +73,20 @@ export class TopologyManager extends EventEmitter implements ITopologyManager {
       throw new Error(`Maximum agents (${this.config.maxAgents}) reached`);
     }
 
+    // Resolve the role before wiring connections. In hierarchical and
+    // centralized topologies determineRole() may downgrade a requested
+    // queen/coordinator to worker once a leader exists; calculateInitialConnections()
+    // must see the resolved role, not the raw request, or a downgraded node is
+    // wired to every existing node as if it were the leader.
+    const resolvedRole = this.determineRole(role);
+
     // Create node with connections based on topology type
-    const connections = this.calculateInitialConnections(agentId, role);
+    const connections = this.calculateInitialConnections(agentId, resolvedRole);
 
     const node: TopologyNode = {
       id: `node_${agentId}`,
       agentId,
-      role: this.determineRole(role),
+      role: resolvedRole,
       status: 'syncing',
       connections,
       metadata: {

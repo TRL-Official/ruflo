@@ -3,10 +3,11 @@
  * host, drawn by the mod's own page bodies in the standalone pane, headless and with an injected terminal. Run with
  *   npx vitest run plugins/ruflo-console/tests/tui-session.spec.ts
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { depthOf, keyOf, NOT_A_TERMINAL_HINT, runTui, type TuiIO } from '../tui/run'
 import { openSession } from '../tui/session'
@@ -32,7 +33,7 @@ beforeAll(() => {
   // The same project with an escape sequence and a token where a swarm id and topology are read from disk (both files that name it).
   put(hostile, { ...RUFLO_FILES, '.swarm/state.json': JSON.stringify({ id: `swarm-\u001b]0;pwned\u0007-1`, topology: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', status: 'running' }), '.claude-flow/swarm/swarm-state.json': JSON.stringify({ swarms: { 'swarm-1': { swarmId: `swarm-\u001b]0;pwned\u0007-1`, topology: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', status: 'running', agents: [] } } }) })
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 function fakeIO(isTTY: boolean) {
   const out: string[] = []
@@ -50,6 +51,20 @@ function fakeIO(isTTY: boolean) {
 }
 
 describe('the same views over real ruflo files', () => {
+  it('the config folder is <home>/.claude when CLAUDE_CONFIG_DIR is not given, so the plugin, marketplace and run reads have somewhere to look', async () => {
+    const session = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') })
+
+    await session.refresh()
+    expect(session.state.configDir).toBe(`${join(root, 'home')}/.claude`)
+    session.stop()
+
+    const explicit = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home'), configDir: join(root, 'elsewhere') })
+
+    await explicit.refresh()
+    expect(explicit.state.configDir).toBe(join(root, 'elsewhere'))
+    explicit.stop()
+  })
+
   it('Overview shows the swarm, the daemon and the helpers read from disk', async () => {
     const session = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') })
 
@@ -229,5 +244,14 @@ describe('keys and colour depth', () => {
     expect(depthOf({})).toBe('none')
     expect(depthOf({ TERM: 'xterm-256color' })).toBe('256')
     expect(depthOf({ TERM: 'xterm', COLORTERM: 'truecolor' })).toBe('truecolor')
+  })
+
+  it('keeps colour on Windows, where TERM is unset in Windows Terminal, PowerShell and cmd', () => {
+    expect(depthOf({ OS: 'Windows_NT' })).toBe('256')
+    expect(depthOf({ OS: 'Windows_NT', TERM: '' })).toBe('256')
+    expect(depthOf({ OS: 'Windows_NT', COLORTERM: 'truecolor' })).toBe('truecolor')
+    expect(depthOf({ OS: 'Windows_NT', TERM: 'dumb' })).toBe('none')
+    expect(depthOf({ OS: 'Windows_NT', NO_COLOR: '1', COLORTERM: 'truecolor' })).toBe('none')
+    expect(depthOf({ COLORTERM: 'truecolor' })).toBe('none')
   })
 })

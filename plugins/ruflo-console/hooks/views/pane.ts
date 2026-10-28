@@ -30,6 +30,7 @@ import { themesView } from './themes'
 import { settingsView } from './settings'
 import { whatsnewView } from './whatsnew'
 import { adrsView } from './adr'
+import { rureView } from './rure'
 import { devtoolsResult, devtoolsView } from './devtools'
 import { sandboxView } from './sandbox'
 import { federationView } from './federation'
@@ -69,7 +70,9 @@ const NETWORKS: readonly (readonly [string, ViewId])[] = [['x.ruv.io', 'xruv'], 
 const WIDE_TABS = 140
 
 export const BODIES: Record<ViewId, (ctx: Ctx) => RenderElement> = {
-  menu: menuView,
+  // Read at call time: views/menu reaches this module through mission-control > model-tools, so loading menu first (a test does) would otherwise
+  // find `menuView` not yet defined when this table is built.
+  menu: ctx => menuView(ctx),
   overview: overviewView,
   swarm: swarmView,
   workflows: workflowsPage,
@@ -100,7 +103,7 @@ export const BODIES: Record<ViewId, (ctx: Ctx) => RenderElement> = {
   market: catalogView,
   themes: themesView,
   settings: settingsView,
-  whatsnew: whatsnewView, adrs: adrsView,
+  whatsnew: whatsnewView, adrs: adrsView, rure: rureView,
   agent: agentView,
 }
 

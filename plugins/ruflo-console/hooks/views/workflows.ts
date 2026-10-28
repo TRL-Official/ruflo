@@ -8,6 +8,7 @@ import { spawnAgent, stopAgent } from '../ops'
 import { ago, clip, col, kv, row, rule, text, THEME, type Ctx } from './common'
 import { flow, runTag } from './wf-layout'
 import { slotsFor } from './wf-slots'
+import { managedRunRows } from './managed'
 
 /** What the workflows view asks of the controller: a confirm-gated ruflo verb, or to name a transcript's path. */
 export type WorkflowsHooks = { ask: (spec: ActionSpec) => void; show: (path: string) => void }
@@ -56,7 +57,7 @@ function header(ctx: Ctx, run: WfRun, runs: readonly WfRun[], at: number): Rende
 
 /** Left cell: `❯ ✔ Build  4/4`, the cursor row bold, the run's current phase marked ❯. */
 function phaseCell(ctx: Ctx, phase: WfPhase, index: number, flags: { isHere: boolean; isCurrent: boolean; width: number }): RenderElement {
-  const { mark, color } = phaseMark(phase, ctx.nowMs)
+  const { mark, color } = phase.agents.some(a => a.isUnverified) ? { mark: '○', color: THEME.info } : phaseMark(phase, ctx.nowMs)
   const count = `${phase.done}/${phase.total}`
   const title = clip(`${index + 1} ${phase.title}`, Math.max(4, flags.width - count.length - 6))
 
@@ -78,7 +79,7 @@ function agentCell(ctx: Ctx, agent: WfAgent, isHere: boolean, width: number): Re
   const label = clip(agent.label, Math.max(6, width - fixed - 1))
 
   return row(ctx, [
-    ctx.kit.Text({ ...(COLOR(agent.state) !== undefined && { color: COLOR(agent.state) as string }), children: `${isHere ? '▸' : ' '}${MARK(agent.state, ctx.nowMs)} ` }),
+    ctx.kit.Text({ ...((agent.isUnverified ? THEME.info : COLOR(agent.state)) !== undefined && { color: agent.isUnverified ? THEME.info : COLOR(agent.state) as string }), children: `${isHere ? '▸' : ' '}${agent.isUnverified && agent.state === 'done' ? '○' : MARK(agent.state, ctx.nowMs)} ` }),
     ctx.kit.Text({ wrap: 'truncate-end', ...(isHere && { bold: true }), children: `${label.padEnd(Math.max(6, width - fixed))}` }),
     ...(width >= 62 && model !== '' ? [ctx.kit.Text({ dimColor: true, children: model })] : []),
     ...(width >= 74 && badge !== '' ? [ctx.kit.Text({ color: THEME.info, children: badge })] : []),
@@ -140,13 +141,14 @@ export function workflowsView(ctx: Ctx, model: WorkflowsModel | null, ui: WfUi, 
   const here = pick(ui, model.runs)
 
   if (here.run === null) {
-    rows.push(text(ctx, model.root === null ? 'No Claude Code config directory is known here, so no workflow runs can be read.' : `No workflow runs for this project under ${clip(model.root, Math.max(20, ctx.columns - 30))}, and no ruflo swarm yet.`, { color: THEME.warn }))
+    rows.push(text(ctx, model.root === null ? 'No Claude Code config directory is known here, so no workflow runs can be read.' : `No workflow runs for this project under ${clip(model.root, Math.max(20, ctx.columns - 30))}, and no ruflo swarm or managed session yet.`, { color: THEME.warn }))
     rows.push(text(ctx, 'Claude Code writes a run folder when a Workflow script starts; ruflo agents appear once a swarm exists.', { dimColor: true }))
 
     return col(ctx, rows, 'workflows')
   }
 
   rows.push(...header(ctx, here.run, model.runs, here.ui.run))
+  if (here.run.managed) rows.push(...managedRunRows(ctx, here.run, hooks.ask))
 
   const run = here.run
   const wide = ctx.columns >= 56

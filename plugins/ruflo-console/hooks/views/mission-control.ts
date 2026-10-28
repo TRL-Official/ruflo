@@ -2,7 +2,7 @@ import type { RenderElement } from 'claude-code'
 
 import { lifecycleOf, PHASE_NAME, PROFILES, RIGORS, stageOf } from '../goap'
 import { guidanceStatus } from '../mission-guidance'
-import { activeMission, derive, mcOf, nextTask, progressOf, rufloTaskOf, type Derived, type LedgerTask, type McTab, type MissionRecord } from '../mission-control'
+import { activeMission, derive, isOver, mcOf, nextTask, progressOf, rufloTaskOf, type Derived, type LedgerTask, type McTab, type MissionRecord } from '../mission-control'
 import { ACCENT, chip as inverseChip, TONE } from '../menu-colors'
 import { barCells, percentOf, stripStatus } from '../mission-strip'
 import { ago, button, clip, col, confirmHere, isBbs, paragraph, row, rule, section, text, THEME, wrap, type Ctx } from './common'
@@ -222,7 +222,6 @@ const flowRows = (ctx: Ctx): RenderElement[] => wrap(FLOW, Math.max(20, ctx.colu
  * project's (not picked, not handed to Claude, not in the prompt) until the person adopts them here or says they belong elsewhere.
  */
 function legacyRows(ctx: Ctx, legacy: readonly MissionRecord[]): RenderElement[] {
-  const n = legacy.length
   // The offer can mix missions from several projects, so each one is adopted or turned away on its own row.
   const offerRow = (m: MissionRecord) => row(ctx, [
     text(ctx, `   ${m.id.slice(4, 10)}  ${clip(m.objective, Math.max(16, ctx.columns - 36))} `, { dimColor: true }),
@@ -231,11 +230,20 @@ function legacyRows(ctx: Ctx, legacy: readonly MissionRecord[]): RenderElement[]
     button(ctx, `mc-legacy-dismiss-${m.id}`, ' not here ', () => ctx.act.mission.dismissLegacy(m.id)),
   ], `mc-legacy-${m.id}`)
 
+  // A mission that names this project came from the copy in the project folder (a file a cloned repository can ship); one that names none is from the old shared ledger.
+  const fromFolder = legacy.filter(m => m.cwd !== undefined)
+  const old = legacy.filter(m => m.cwd === undefined)
+  const group = (missions: readonly MissionRecord[], heading: string): RenderElement[] =>
+    missions.length === 0 ? [] : [
+      ...paragraph(ctx, heading, { color: THEME.warn }),
+      ...missions.slice(0, 5).map(offerRow),
+      ...(missions.length > 5 ? [text(ctx, `   … and ${missions.length - 5} more`, { dimColor: true })] : []),
+    ]
+
   return [
-    ...paragraph(ctx, ` ${n} mission${n === 1 ? '' : 's'} from before per-project storage, with no project recorded. Adopt one only if it was made in this project:`, { color: THEME.warn }),
-    ...legacy.slice(0, 5).map(offerRow),
-    ...(n > 5 ? [text(ctx, `   … and ${n - 5} more`, { dimColor: true })] : []),
-    ...(n > 1 ? [row(ctx, [text(ctx, '   '), button(ctx, 'mc-legacy-dismiss', ' none of these are this project\'s ', () => ctx.act.mission.dismissLegacy())], 'mc-legacy')] : []),
+    ...group(fromFolder, ` ${fromFolder.length} mission${fromFolder.length === 1 ? '' : 's'} found in this project's folder (.claude-flow/console/mission-ledger.json) but not in the console's own store. A cloned repo can ship that file, so adopt one only if you made it:`),
+    ...group(old, ` ${old.length} mission${old.length === 1 ? '' : 's'} from before per-project storage, with no project recorded. Adopt one only if it was made in this project:`),
+    ...(old.length > 1 ? [row(ctx, [text(ctx, '   '), button(ctx, 'mc-legacy-dismiss', ' none of these are this project\'s ', () => ctx.act.mission.dismissLegacy())], 'mc-legacy')] : []),
   ]
 }
 
@@ -337,7 +345,7 @@ export function missionStrip(ctx: Ctx): RenderElement[] {
   const open = ctx.kit.Button({ key: 'menu-go-missions-top', label: ' (1) open Missions ', plain: true, onPress: () => ctx.act.view('missions') })
 
   // The goal field is always here, with or without an active mission: Enter plans the goal and opens Missions.
-  const field = box(ctx, 'menu-goal', '✎ goal', mission === null ? 'what do you want done? e.g. add a dark mode toggle to settings' : 'a new goal, planned in place of this one', 'plan', value => {
+  const field = box(ctx, 'menu-goal', '✎ goal', mission === null ? 'what do you want done? e.g. add a dark mode toggle to settings' : isOver(mission, ctx.state.snapshot?.tasks ?? []) ? 'a new goal: plan it, then create it as another mission' : 'a new goal, planned in place of this one', 'plan', value => {
     ctx.act.view('missions')
     m.goal(value)
   })

@@ -14,8 +14,8 @@ RuFlo AI Team is a hosted MCP service (`https://team.ruv.io/mcp`) plus a Claude 
 Slash commands work where your surface supports plugin commands (Claude Code, Cowork). Plain-language prompts work everywhere the connector is available, including claude.ai.
 
 1. Start a team. Claude Code or Cowork: `/team-start prepare the release checklist for v2.0`. claude.ai: "Use RuFlo AI Team to plan a release-readiness team for v2.0. Show me the roles, tasks and budget before creating anything."
-2. Check progress. `/team-status` (it lists your teams if you give no ID), or "What is blocked on my AI team and who owns each task?"
-3. Remember a decision. "Remember for my team that we only deploy on weekdays." Later: "What constraints did we record for the team?"
+2. Check progress. `/team-status` (it lists your teams if you give no ID), `/team-board RUN_ID` for the board view, or "What is blocked on my AI team and who owns each task?"
+3. Remember a decision. `/team-remember we only deploy on weekdays`, or "Remember for my team that we only deploy on weekdays." Later: "What constraints did we record for the team?"
 4. Review the result. `/team-review RUN_ID`, or "Check run RUN_ID against its acceptance criteria and tell me which claims have evidence."
 5. Pause without losing anything. `/team-stop TEAM_ID`, or "Pause the team and export its evidence first."
 
@@ -62,7 +62,11 @@ The anonymous methods return only static definitions: tool schemas, prompt text,
 
 Cross-origin (browser) reads are limited to an explicit allowlist. By default it covers `https://chatgpt.com`, `https://chat.openai.com` and `https://claude.ai`; set `ALLOWED_ORIGINS` (comma-separated origins) to replace it. The request origin is echoed back only when it is on the list, with `Vary: Origin`. No `access-control-allow-origin` header is sent for any other origin. ChatGPT and Claude call the endpoint server-to-server and the board UI makes no network requests, so the allowlist governs browser-based MCP clients only. Requests without an `Origin` header are unaffected.
 
-Memory search reports `lexical-degraded` unless a compatible native RuVector binding passes the startup probe. The pinned `@ruvector/core` 0.1.32 package with its 0.1.30 optional native binding fails that probe in local validation with a dimension mismatch. Do not set `RUFLO_AI_TEAM_VECTOR=native` in production until a compatible binary is verified.
+Memory search is semantic when `RUFLO_AI_TEAM_EMBEDDINGS_KEY` (a Cognitum API key with the `embeddings:run` scope) is set: memory text and queries are embedded through `POST https://api.cognitum.one/v1/embeddings` (`cognitum-embed`, 384-dim), the vector is stored with the memory, and the response says `"backend": "cognitum-embed"`. The embeddings URL must be an https `cognitum.one` host. If the key is missing or the API is down, search answers from the labelled `lexical-degraded` index instead of failing; a response with `unindexed` set means some memories were not embedded yet and the next search continues. Listing memories newest first with a team filter uses the composite index in `deploy/firestore.indexes.json`; without it the service falls back to an unordered read.
+
+Unauthenticated requests (discovery, legal pages) are limited per client to `RUFLO_AI_TEAM_ANON_RPM` (default 600) a minute; OAuth callers and `/health` are not throttled. Each first-class workflow step logs one `ai_team_activation` line with a hashed tenant, for a log-based funnel metric.
+
+Without an embeddings key, memory search reports `lexical-degraded` unless a compatible native RuVector binding passes the startup probe. The pinned `@ruvector/core` 0.1.32 package with its 0.1.30 optional native binding fails that probe in local validation with a dimension mismatch. Do not set `RUFLO_AI_TEAM_VECTOR=native` in production until a compatible binary is verified.
 
 ## Local verification
 
@@ -97,7 +101,7 @@ The plugin owns the `ruflo-ai-team-*` namespace. Tenant data is never separated 
 
 AI Team also ships as a function-hook mod (ADR-445 pattern; hooks in `hooks/`, loaded with the plugin). No network, no process, no model call.
 
-- **Guard (default on)**: refuses a team write (`memory_remember`, `task_create`, `task_update`, `run_create` on the ruflo-ai-team server) that holds a key, token or password. It only tightens: it never allows anything the session would deny, and the refusal never repeats the secret. Turn it off with the `guard` option.
+- **Guard (default on)**: refuses a team write (`memory_remember`, `task_create`, `task_update`, `run_create`, `team_create`, `team_update` on the ruflo-ai-team server) that holds a key, token or password. It only tightens: it never allows anything the session would deny, and the refusal never repeats the secret. Turn it off with the `guard` option.
 - **`/ai-team-mod`**: answered locally. `/ai-team-mod status`, `/ai-team-mod scan <text>`.
 - **Status file**: `.claude-flow/ai-team-mod/status.json` (`version`, `updatedMs`, counters), written at session start and whenever a call is refused; the console reads it.
 - **Options** (`userConfig`): `guard` (`on` by default).

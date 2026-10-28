@@ -2,6 +2,11 @@
 
 Newest first. One `## <version> — <date>` heading per version, then `feat:`, `fix:`, `breaking:` and `chore:` bullets (ADR-478). Built from git history; older versions: `git log -- plugins/ruflo-x-gateway`.
 
+## 0.10.2 — 2026-10-24
+- fix: a `tools/call` without an `arguments` field (allowed by MCP, and what clients send for tools that take none) failed with `-32602 expected object, received undefined` on every path; an absent or null `arguments` is now treated as `{}` (gateway 0.9.1)
+- fix: `POST /` on the bare host now serves the directory-safe profile instead of a 404, so a connector added as `https://x.ruv.io` (no path) works; its OAuth challenge points at the root metadata
+- chore: the gateway log now records why a bearer was denied (`why=`) and one `mcp-reject` line per 4xx/5xx MCP response (path, status, JSON-RPC method, protocol-version header, client name); no body or token is logged
+
 ## 0.10.1 — 2026-10-12
 - fix: the shared text screen now catches `.env` and e-mailed credentials, no longer flags a model's token talk (`--max-tokens`, `/oauth/token`, "token usage"), and no longer flags values that only name where a secret lives (`./service-account.json`, `--set-secrets=NAME=NAME:latest`); every rule stays linear (#4094, thanks @proffesor-for-testing)
 

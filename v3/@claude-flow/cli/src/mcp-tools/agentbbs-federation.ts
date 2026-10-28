@@ -52,7 +52,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
@@ -170,7 +170,12 @@ function peersPath(basePath: string): string {
 }
 
 function roomLogPath(basePath: string, roomId: string): string {
-  return join(basePath, `room-${roomId}.jsonl`);
+  // The room id reaches a file name: validate it, then make sure the result stays under basePath.
+  validateRoomId(roomId);
+  const file = join(basePath, `room-${roomId}.jsonl`);
+  const rel = relative(resolve(basePath), resolve(file));
+  if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('Invalid room id');
+  return file;
 }
 
 /**

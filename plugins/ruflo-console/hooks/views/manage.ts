@@ -3,6 +3,7 @@
  * entries (by id), so a button here runs exactly what the palette or `/ruflo run <id>` would.
  */
 import type { RenderElement } from 'claude-code'
+import { managedApprovalRows } from './managed'
 
 import { approvalsOf, waitingApprovalsOf } from '../data/alerts'
 import type { Lane } from '../gfx/maps'
@@ -23,6 +24,7 @@ export function approvalsView(ctx: Ctx): RenderElement {
   const items = approvalsOf(ctx.state)
   const picked = items.length === 0 ? -1 : ((ctx.state.select.item % items.length) + items.length) % items.length
   const rows: RenderElement[] = [rule(ctx, 'Approvals', items.length === 0 ? 'nothing waiting' : headline(items.length, waitingApprovalsOf(ctx.state).length))]
+  rows.push(...managedApprovalRows(ctx))
 
   if (items.length === 0) {
     rows.push(...paragraph(ctx, 'No hive-mind proposals, stealable claims, refused mods, permission denies or budget alerts waiting.', { dimColor: true }))

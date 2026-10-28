@@ -31,7 +31,7 @@ npx -y -p @claude-flow/plugin-agent-federation@latest ruflo-federation --help
 
 ```bash
 FEDERATION_NODE_NAME=my-node           # default: hostname
-FEDERATION_BIND_HOST=0.0.0.0           # default: 0.0.0.0
+FEDERATION_BIND_HOST=127.0.0.1         # default: 127.0.0.1 (0.0.0.0 accepts other hosts)
 FEDERATION_BIND_PORT=8443              # default: 8443
 FEDERATION_TRUST_LEVEL=untrusted       # default: untrusted
 ```

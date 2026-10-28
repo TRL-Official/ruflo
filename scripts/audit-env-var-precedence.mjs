@@ -57,6 +57,7 @@ const KNOWN_ESCAPE_HATCHES = new Set([
   'RUFLO_ADMIN_TOKEN',            // credential: the x.ruv.io gateway's OWN admin token, read by plugins/ruflo-x-gateway. Env-only by design — a secret must never be a CLI flag (shell history / process lists), and the gateway is a service with no typed command surface at all.
   'RUFLO_SERAPHINA_DAILY_CAP',    // gateway spend guard (#3275): shared daily Seraphina budget. Read by a long-running service, not a typed command — there is no invocation to attach a flag to.
   'RUFLO_SERAPHINA_IP_HOURLY_CAP',// gateway spend guard (#3275): per-client hourly Seraphina budget. Same service-only reasoning.
+  'RUFLO_MANAGED_AGENTS_BASE_URL',// Trust boundary: the Managed Agents adapter sends the API key to this origin, so it is operator config only. MCP/CLI arguments cannot select another host; apiBase() accepts a bare HTTPS origin (no credentials, path, query or fragment) and every request uses redirect:'error'.
   'RUFLO_X_GATEWAY_URL',          // Trust boundary: gateway reads/admin writes pin destinations to server config; MCP/CLI arguments cannot select another host.
   'SERAPHINA_METALLM_URL',        // Trust boundary: credential-bearing Meta-LLM requests pin destinations to server config.
   'RUFLO_X_ADMIN_TOKEN',          // credential: gateway admin token for x.ruv.io gateway-identity writes (x_federation_publish/invite_mint/admit). Env-only by design — a secret must never be a CLI flag (shell history / process lists). Gateway destination is trusted server config; --gateway/tool arguments must match it.

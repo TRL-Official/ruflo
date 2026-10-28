@@ -157,3 +157,17 @@ This plugin also loads as a function-hook mod (ADR-445 pattern, `hooks/hooks.jso
 - **Option.** `guard` (`on` | `off`, default `on`) in the plugin's `userConfig`.
 
 Test it: `claude plugin validate plugins/ruflo-workflows`, `claude plugin test plugins/ruflo-workflows`, `bash plugins/ruflo-workflows/scripts/smoke.sh`.
+
+## Optional cloud execution
+
+For Anthropic hosted dynamic workflows, use the existing `ruflo-agent`
+`managed_agent_*` adapter. Its opt-in configuration and safety contract are
+[documented here](../ruflo-agent/README.md#dynamic-workflows). This is a third
+execution surface alongside persisted MCP workflows and local Claude Code JS
+workflows. It does not change `workflow_run` scheduling or turn a native
+workflow script into a Managed Agents workflow program.
+
+`/wf-mod managed` now discovers the installed cloud capability tool from the
+current registry. Missing tools and failed discovery are reported separately.
+Use `/managed-workflow` from ruflo-agent to execute bounded remote work. These
+local commands do not establish provider access or grant execution permission.

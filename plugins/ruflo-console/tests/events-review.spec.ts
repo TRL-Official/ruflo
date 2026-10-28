@@ -14,6 +14,7 @@ import type { ConsoleEvent } from '../hooks/data/events'
 import { eventsActions, eventsUi } from '../hooks/events-ui'
 import type { Host } from '../hooks/host'
 import { newState } from '../hooks/state'
+import { setWriteFlavor } from '../hooks/data/write-flavor'
 import { hostOn, newDisk, type Disk } from './fixtures/activity-fs'
 
 
@@ -189,6 +190,7 @@ describe('what reaches the disk (privacy)', () => {
     expect(disk.files.get(`${CWD}/${EVENTS_FILE}`)).toContain('keep me out')
 
     actions.forget()
+    await new Promise<void>(resolve => setTimeout(resolve, 0)) // the flavor is awaited before the ask is built
 
     const spec = asked[0] as { argv: readonly string[]; onOutput: (out: string) => void }
 
@@ -203,6 +205,59 @@ describe('what reaches the disk (privacy)', () => {
     await tick(state, host, T + 220_000)
     expect(disk.files.get(`${CWD}/${EVENTS_FILE}`) ?? '').not.toContain('keep me out')
     expect(activityOf(state).log).toHaveLength(0)
+  })
+
+  it('on Windows (host-fs, no rm) forget empties the two files through the host file API and runs no command', async () => {
+    setWriteFlavor('host-fs')
+
+    try {
+      const disk = newDisk()
+      const { state, host: base } = consoleOn(disk)
+      const host = { ...base, fs: { ...base.fs, write: async (path: string, text: string) => void disk.files.set(path, text) } } as unknown as Host
+      const asked: { argv?: readonly string[]; run?: () => Promise<{ ok: boolean; detail: string }> }[] = []
+      const actions = eventsActions(state, host, () => undefined, spec => void asked.push(spec as never), () => undefined)
+
+      disk.files.set(`${CWD}/${EVENTS_FILE}`, '{"v":1}\n')
+      disk.files.set(`${CWD}/${LANES_FILE}`, '{"v":1}\n')
+      actions.forget()
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+      const spec = asked[0]
+
+      expect(spec?.argv).toBeUndefined()
+      expect(spec?.run).toBeTypeOf('function')
+
+      const report = await (spec?.run as () => Promise<{ ok: boolean; detail: string }>)()
+
+      expect(report.ok).toBe(true)
+      expect(disk.files.get(`${CWD}/${EVENTS_FILE}`)).toBe('')
+      expect(disk.files.get(`${CWD}/${LANES_FILE}`)).toBe('')
+      expect(disk.runs.filter(argv => argv[0] === 'rm')).toHaveLength(0)
+    } finally {
+      setWriteFlavor(null)
+    }
+  })
+
+  it('on Windows forget leaves a missing file missing, and says why when the host refuses the write', async () => {
+    setWriteFlavor('host-fs')
+
+    try {
+      const disk = newDisk({ [`${CWD}/${EVENTS_FILE}`]: 'x\n' })
+      const { state, host: base } = consoleOn(disk)
+      const refusing = { ...base, fs: { ...base.fs, write: async () => { throw new Error('EPERM: file is locked') } } } as unknown as Host
+      const asked: { run?: () => Promise<{ ok: boolean; detail: string }> }[] = []
+
+      eventsActions(state, refusing, () => undefined, spec => void asked.push(spec as never), () => undefined).forget()
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+      const report = await (asked[0]?.run as () => Promise<{ ok: boolean; detail: string }>)()
+
+      expect(report.ok).toBe(false)
+      expect(report.detail).toContain('EPERM')
+      expect(disk.files.has(`${CWD}/${LANES_FILE}`)).toBe(false)
+    } finally {
+      setWriteFlavor(null)
+    }
   })
 
   it('a hostile history file is masked when it is read, and a poisoned prefs file cannot pollute prototypes', async () => {

@@ -56,8 +56,21 @@ export function hostOf(world: World, special: Special = () => undefined): Host {
 
   return {
     run: async (argv: readonly string[]) => {
-      const tool = argv[argv.indexOf('-t') + 1] as string
-      const params = JSON.parse(argv[argv.indexOf('-p') + 1] as string) as Record<string, unknown>
+      // The plan goes in a file (`ruflo mission plan --plan-file`, which prints the bare answer JSON), not as an `mcp exec -p` argument.
+      const viaFile = argv[argv.indexOf('mission') + 1] === 'plan'
+      const flag = (name: string) => argv[argv.indexOf(name) + 1] as string
+
+      // Anything else without `-t` is the plan file's write (the gnu and posix flavors write by argv).
+      if (!viaFile && argv.indexOf('-t') < 0) return { exitCode: 0, stdout: '', stderr: '' }
+
+      const tool = viaFile ? 'mission_plan' : (argv[argv.indexOf('-t') + 1] as string)
+      const params = viaFile ? { requestId: flag('--request-id'), missionId: flag('--mission'), expectedRevision: Number(flag('--expected-revision')) } : (JSON.parse(argv[argv.indexOf('-p') + 1] as string) as Record<string, unknown>)
+      const bare = (reply: Run): Run => {
+        const marker = '\nResult:\n'
+        const at = reply.stdout.indexOf(marker)
+
+        return viaFile && at >= 0 ? { ...reply, stdout: reply.stdout.slice(at + marker.length) } : reply
+      }
       const key = tool === 'task_create' ? `${tool}:${String((params.tags as string[])[1])}` : tool === 'task_cancel' ? `${tool}:${String(params.taskId)}` : tool
       const nth = (seen.get(key) ?? 0) + 1
 
@@ -67,29 +80,29 @@ export function hostOf(world: World, special: Special = () => undefined): Host {
       const out = await special(tool, params, nth, world)
 
       if (out instanceof Error) throw out
-      if (out !== undefined) return out
-      if (tool === 'mission_create') return answer(params, { ok: true, data: { missionId: ID, revision: 1, state: 'draft', deduplicated: false } }, tool, real('m-create'))
-      if (tool === 'mission_plan') return answer(params, { ok: true, data: { missionId: ID, revision: 2, state: 'planned', deduplicated: false, sequence: 2, planDigest: 'sha256:abc' } }, tool, real('m-plan-ok'))
+      if (out !== undefined) return bare(out)
+      if (tool === 'mission_create') return bare(answer(params, { ok: true, data: { missionId: ID, revision: 1, state: 'draft', deduplicated: false } }, tool, real('m-create')))
+      if (tool === 'mission_plan') return bare(answer(params, { ok: true, data: { missionId: ID, revision: 2, state: 'planned', deduplicated: false, sequence: 2, planDigest: 'sha256:abc' } }, tool, real('m-plan-ok')))
       if (tool === 'task_create') {
         const taskId = make(params)
 
-        return answer(params, { ...world.store[taskId], priority: 'normal' }, tool)
+        return bare(answer(params, { ...world.store[taskId], priority: 'normal' }, tool))
       }
       if (tool === 'task_cancel') {
         const task = world.store[String(params.taskId)]
 
-        if (task === undefined) return answer(params, { success: false, taskId: params.taskId, error: 'Task not found' }, tool, real('t-cancel-missing'))
+        if (task === undefined) return bare(answer(params, { success: false, taskId: params.taskId, error: 'Task not found' }, tool, real('t-cancel-missing')))
         task.status = 'cancelled'
 
-        return answer(params, { success: true, taskId: params.taskId, status: 'cancelled', cancelledAt: new Date().toISOString() }, tool, real('t-cancel'))
+        return bare(answer(params, { success: true, taskId: params.taskId, status: 'cancelled', cancelledAt: new Date().toISOString() }, tool, real('t-cancel')))
       }
       if (tool === 'mission_request_action') {
         world.mission = 'cancelled'
 
-        return answer(params, { ok: true, data: { missionId: ID, revision: 4, state: 'cancelled', deduplicated: false, sequence: 4 } }, tool, real('m-cancel-ok'))
+        return bare(answer(params, { ok: true, data: { missionId: ID, revision: 4, state: 'cancelled', deduplicated: false, sequence: 4 } }, tool, real('m-cancel-ok')))
       }
 
-      return answer(params, { ok: true }, tool)
+      return bare(answer(params, { ok: true }, tool))
     },
     fs: {
       read: async (path: string) => {
@@ -101,6 +114,9 @@ export function hostOf(world: World, special: Special = () => undefined): Host {
       },
       stat: async () => undefined,
       list: async () => [],
+      // The plan file's write where the host's file API does it (Windows); elsewhere it is an argv with no `-t` (handled in `run`).
+      write: async () => undefined,
+      exists: async () => false,
     },
     // The backoff waits go through the host's clock: recorded, and they return at once (after the test's hook). Read time limits never fire.
     after: (ms: number, fn: () => void) => {

@@ -14,7 +14,7 @@
 import { ConfigFileManager } from './config-file-manager.js';
 import { EventEmitter } from 'events';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, unlinkSync, renameSync } from 'fs';
-import { cpus } from 'os';
+import { cpus, homedir } from 'os';
 import { join } from 'path';
 import { createRequire } from 'node:module';
 import { writeFileAtomic } from '../fs-secure.js';
@@ -235,6 +235,19 @@ function readEnvSecsAsMs(name: string, defaultMs: number): number {
 /**
  * Worker Daemon - Manages background workers with Node.js
  */
+/** `daemon.aiWorkers.enabled` from the USER-level config only (never the project's). */
+function readUserAiWorkersOptIn(): boolean | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), '.claude-flow', 'config.json'), 'utf-8'));
+    const nested = raw?.daemon?.aiWorkers?.enabled;
+    const dotted = raw?.['daemon.aiWorkers.enabled'];
+    const v = nested ?? dotted;
+    return typeof v === 'boolean' ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class WorkerDaemon extends EventEmitter {
   private config: DaemonConfig;
   private workers: Map<WorkerType, WorkerState> = new Map();
@@ -274,6 +287,9 @@ export class WorkerDaemon extends EventEmitter {
   // .claude-flow/daemon-state.json had persisted from a previous run.
   private fileConfigResourceThresholds?: { maxCpuLoad?: number; minFreeMemoryPercent?: number };
 
+  // #4462 — the same record for maxConcurrent / workerTimeoutMs.
+  private fileConfigScalars?: { maxConcurrent?: number; workerTimeoutMs?: number };
+
   // #2661 root-fix — resolved once (git identity doesn't change at runtime)
   // and reused for lease heartbeats + supervisor election, both gated on
   // aiWorkersEnabled since they only matter for the recurring AI schedule.
@@ -295,6 +311,7 @@ export class WorkerDaemon extends EventEmitter {
       maxCpuLoad: fileConfig.maxCpuLoad,
       minFreeMemoryPercent: fileConfig.minFreeMemoryPercent,
     };
+    this.fileConfigScalars = { maxConcurrent: fileConfig.maxConcurrent, workerTimeoutMs: fileConfig.workerTimeoutMs };
 
     // CPU-proportional smart default instead of hardcoded 2.0
     const cpuCount = WorkerDaemon.getEffectiveCpuCount();
@@ -338,9 +355,15 @@ export class WorkerDaemon extends EventEmitter {
       // #2661 — AI workers are opt-in: flag > config.json > env > OFF.
       // Deliberately NOT restored from daemon-state.json (initializeWorkerStates
       // whitelist) so a stale state file can never resurrect consent.
+      // SECURITY: the project's own config file is repo content and may come
+      // from a clone, so it can never switch AI workers on. Only the flag, the
+      // env var, or the user-level ~/.claude-flow/config.json can.
+      // A project file may still say `false` (it can only make this safer).
       aiWorkersEnabled: config?.aiWorkersEnabled
-        ?? fileConfig.aiWorkersEnabled
-        ?? (process.env.RUFLO_DAEMON_AI_WORKERS === '1'),
+        ?? (fileConfig.aiWorkersEnabled === false ? false : undefined)
+        ?? (process.env.RUFLO_DAEMON_AI_WORKERS === '1' ? true : undefined)
+        ?? readUserAiWorkersOptIn()
+        ?? false,
       workers: (config?.workers ?? DEFAULT_WORKERS).map(worker => ({ ...worker })),
       enabledWorkers: config?.enabledWorkers,
     };
@@ -394,7 +417,7 @@ export class WorkerDaemon extends EventEmitter {
     if (!this.config.aiWorkersEnabled) {
       this.log(
         'info',
-        'AI workers disabled (default) - all workers run local-only. Enable with `daemon start --headless`, daemon.aiWorkers.enabled=true, or RUFLO_DAEMON_AI_WORKERS=1 (#2661)'
+        'AI workers disabled (default) - all workers run local-only. Enable with `daemon start --headless`, daemon.aiWorkers.enabled=true in ~/.claude-flow/config.json (a project config cannot enable it), or RUFLO_DAEMON_AI_WORKERS=1 (#2661)'
       );
       return;
     }
@@ -858,10 +881,16 @@ export class WorkerDaemon extends EventEmitter {
             this.config.resourceThresholds.minFreeMemoryPercent = rt.minFreeMemoryPercent;
           }
         }
-        if (typeof saved.config?.maxConcurrent === 'number' && saved.config.maxConcurrent > 0) {
+        // #4462 — same rule for the two scalar fields: constructor arg or
+        // config.json beats saved state, which only fills in what neither set.
+        const maxConcurrentExplicit = this.originalConfig?.maxConcurrent !== undefined
+          || this.fileConfigScalars?.maxConcurrent !== undefined;
+        const workerTimeoutExplicit = this.originalConfig?.workerTimeoutMs !== undefined
+          || this.fileConfigScalars?.workerTimeoutMs !== undefined;
+        if (!maxConcurrentExplicit && typeof saved.config?.maxConcurrent === 'number' && saved.config.maxConcurrent > 0) {
           this.config.maxConcurrent = saved.config.maxConcurrent;
         }
-        if (typeof saved.config?.workerTimeoutMs === 'number' && saved.config.workerTimeoutMs > 0) {
+        if (!workerTimeoutExplicit && typeof saved.config?.workerTimeoutMs === 'number' && saved.config.workerTimeoutMs > 0) {
           this.config.workerTimeoutMs = saved.config.workerTimeoutMs;
         }
 
@@ -1087,7 +1116,7 @@ export class WorkerDaemon extends EventEmitter {
       }
       try {
         this.log('info', `Dequeued ${trigger}${workerId ? ` (id=${workerId})` : ''} from MCP dispatch queue`);
-        await this.triggerWorker(trigger);
+        await this.triggerWorker(trigger, { manualTrigger: false });
       } catch (err) {
         this.log('warn', `Queued worker ${trigger} failed: ${(err as Error).message}`);
       } finally {
@@ -1325,6 +1354,15 @@ export class WorkerDaemon extends EventEmitter {
     const internalConfig = workerConfig as WorkerConfigInternal;
     const staggerOffset = internalConfig.offsetMs || 0;
 
+    // #4410: only one timer may own a worker type. A redundant enable used to
+    // schedule a second timeout while this.timers kept only the newer handle,
+    // so the original leaked and could fire again after stop().
+    const previousTimer = this.timers.get(workerConfig.type);
+    if (previousTimer) {
+      clearTimeout(previousTimer);
+      this.timers.delete(workerConfig.type);
+    }
+
     // Calculate initial delay with stagger offset
     let initialDelay = staggerOffset;
     if (state.lastRun) {
@@ -1340,8 +1378,9 @@ export class WorkerDaemon extends EventEmitter {
       // Use concurrency-controlled execution (P0 fix)
       await this.executeWorkerWithConcurrencyControl(workerConfig);
 
-      // Reschedule
-      if (this.running) {
+      // Reschedule only while the daemon is running and this worker is still
+      // enabled. Disabling during an in-flight run must not resurrect it.
+      if (this.running && workerConfig.enabled) {
         const timer = setTimeout(runAndReschedule, workerConfig.intervalMs);
         this.timers.set(workerConfig.type, timer);
         state.nextRun = new Date(Date.now() + workerConfig.intervalMs);
@@ -2122,7 +2161,7 @@ export class WorkerDaemon extends EventEmitter {
   /**
    * Manually trigger a worker
    */
-  async triggerWorker(type: WorkerType): Promise<WorkerResult> {
+  async triggerWorker(type: WorkerType, opts: { manualTrigger?: boolean } = {}): Promise<WorkerResult> {
     const workerConfig = this.config.workers.find(w => w.type === type);
     if (!workerConfig) {
       throw new Error(`Unknown worker type: ${type}`);
@@ -2137,7 +2176,9 @@ export class WorkerDaemon extends EventEmitter {
     // #2661 root-fix — an explicit manual trigger bypasses the repository-
     // supervisor gate (still budget/dedup-gated) — see runWorkerLogic()'s
     // doc comment.
-    return this.executeWorker(workerConfig, { manualTrigger: true });
+    // Only an operator's own `daemon trigger` is manual. A file in daemon-queue/ can come from a
+    // cloned repo, so queue runs pass `manualTrigger: false` and stay behind the supervisor gate.
+    return this.executeWorker(workerConfig, { manualTrigger: opts.manualTrigger ?? true });
   }
 
   /**
@@ -2149,13 +2190,18 @@ export class WorkerDaemon extends EventEmitter {
       workerConfig.enabled = enabled;
 
       if (enabled && this.running) {
-        this.scheduleWorker(workerConfig);
+        // A live timer or an in-flight run will schedule the next iteration
+        // itself; scheduling here would create a second chain (#4410).
+        if (!this.timers.has(type) && !this.runningWorkers.has(type)) {
+          this.scheduleWorker(workerConfig);
+        }
       } else if (!enabled) {
         const timer = this.timers.get(type);
         if (timer) {
           clearTimeout(timer);
           this.timers.delete(type);
         }
+        this.pendingWorkers = this.pendingWorkers.filter(workerType => workerType !== type);
       }
 
       this.saveState();

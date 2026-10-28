@@ -7,6 +7,8 @@ import { idOf, type AgentRecord, type ClaimRecord, type Claimant, type TaskRecor
 import type { Snapshot } from './data/snapshot'
 import type { Findings } from './data/failure'
 import type { Host } from './host'
+import type { Options } from './state'
+import type { WriteOp } from './data/write-via'
 
 export type ActionSpec = {
   label: string
@@ -14,8 +16,15 @@ export type ActionSpec = {
   /** A fixed command outside ruflo, or an offline read, with optional JSON on stdin. */
   argv?: readonly string[]
   stdin?: string
+  /** A disk write that goes through the host's file API instead of `argv` (the Windows write flavor, data/write-via.ts); `argv` then is only a stand-in the runner never executes. */
+  write?: WriteOp
   expect: string
   verify?: (snapshot: Snapshot) => boolean
+  /**
+   * Before anything starts (a read at once, a confirmed action after the confirm): a reason it must not run (shown as the result, nothing spawned), or what to run
+   * instead (the arguments, label, lab id, note and reader a check chose, ADR-496), or null to run as built. ADR-495 added it; ADR-496 lets it choose.
+   */
+  preflight?: (host: Pick<Host, 'fs'>, options: Pick<Options, 'rureFolders'>) => Promise<string | Partial<Pick<ActionSpec, 'args' | 'label' | 'lab' | 'note' | 'lines'>> | null>
   /** A local check after a confirmed action succeeds; never part of background refreshes. */
   verifyLocal?: (host: Pick<Host, 'fs' | 'home'>) => Promise<boolean>
   /** Reads only: runs at once, without the confirm step, and shows what the CLI printed. */

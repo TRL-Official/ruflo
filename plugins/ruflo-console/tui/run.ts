@@ -32,10 +32,17 @@ export const isTuiView = (value: unknown): value is TuiView => typeof value === 
 /** Any page the shell can open, which is every console view and the AI page (`--view`, the go prompt). */
 export const isPage = (value: unknown): value is Page => typeof value === 'string' && (PAGE_IDS as readonly string[]).includes(value)
 
-/** Colour depth from the environment: NO_COLOR and a dumb terminal get none, COLORTERM truecolor/24bit gets 24-bit, the rest 256. */
+/**
+ * Colour depth from the environment: NO_COLOR and a dumb terminal get none, COLORTERM truecolor/24bit gets 24-bit, the rest 256.
+ * An unset TERM means no terminal on Unix, but not on Windows: Windows Terminal, PowerShell and cmd leave TERM unset (`OS` is
+ * Windows_NT there) while drawing ANSI, so only an explicit `dumb` turns colour off.
+ */
 export function depthOf(env: Record<string, string | undefined>): Depth {
   if (env.NO_COLOR !== undefined && env.NO_COLOR !== '') return 'none'
-  if (env.TERM === 'dumb' || env.TERM === undefined || env.TERM === '') return 'none'
+
+  const isWindows = env.OS === 'Windows_NT'
+
+  if (env.TERM === 'dumb' || ((env.TERM === undefined || env.TERM === '') && !isWindows)) return 'none'
 
   return env.COLORTERM === 'truecolor' || env.COLORTERM === '24bit' ? 'truecolor' : '256'
 }

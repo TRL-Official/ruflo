@@ -56,7 +56,9 @@ function parseCondition(when: unknown): Condition | Error {
   if (expression === 'true' || expression === 'false') {
     return { constant: expression === 'true' };
   }
-  const match = expression.match(/^([a-zA-Z_]\w*)\s*===?\s*(?:'([^']*)'|"([^"]*)"|(-?\d+(?:\.\d+)?)|(true|false))$/);
+  // Variable names follow the `{{…}}` interpolation syntax, so a condition can
+  // read a task step's output, stored as `<stepId>.output` (`step-1.output`).
+  const match = expression.match(/^([a-zA-Z_][\w.-]*)\s*===?\s*(?:'([^']*)'|"([^"]*)"|(-?\d+(?:\.\d+)?)|(true|false))$/);
   if (!match) {
     return new Error('condition config.when must compare a variable to a quoted string, number, or boolean using == or ===');
   }

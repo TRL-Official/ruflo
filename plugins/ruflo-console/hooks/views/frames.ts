@@ -14,6 +14,7 @@ import { bootFacts } from '../boot-facts'
 import { getBuild } from '../build'
 import { PALETTE, rgb } from '../menu-colors'
 import { CONSOLE_VERSION } from '../version'
+import { baseOf } from '../data/paths'
 import type { Snapshot } from '../data/snapshot'
 import type { Channels, Peers, Roster } from '../data/cli'
 import { pipelinePicture, radarPicture, samplesPicture, trendPicture, gaugePicture, type Stage } from '../gfx/charts'
@@ -192,7 +193,7 @@ export function picturesOf(state: State, columns: number, nowMs: number, t: numb
 
   // The selected boot screen owns the pane for its first seconds; nothing else is drawn under it.
   if (isBooting(state, nowMs)) {
-    pictures.set('boot', state.options.look === 'orbital' ? orbitalBoot(state.cwd.split('/').filter(Boolean).at(-1) ?? '', Math.max(1, Math.min(columns, width, 90)), state.options.fps > 0 ? (nowMs - state.pane.bootAtMs) * theme.motion.speed : 0, getBootChecks(), state.pane.rows > 0 ? state.pane.rows : 30, theme) : bootPicture(state.cwd.split('/').filter(Boolean).at(-1) ?? '', Math.min(width, 90), nowMs - state.pane.bootAtMs, state.probes.size, PROBES.length, state.pane.rows, getBootChecks(), bootFacts(state, CONSOLE_VERSION, getBuild())))
+    pictures.set('boot', state.options.look === 'orbital' ? orbitalBoot(baseOf(state.cwd), Math.max(1, Math.min(columns, width, 90)), state.options.fps > 0 ? (nowMs - state.pane.bootAtMs) * theme.motion.speed : 0, getBootChecks(), state.pane.rows > 0 ? state.pane.rows : 30, theme) : bootPicture(baseOf(state.cwd), Math.min(width, 90), nowMs - state.pane.bootAtMs, state.probes.size, PROBES.length, state.pane.rows, getBootChecks(), bootFacts(state, CONSOLE_VERSION, getBuild())))
 
     return pictures
   }
@@ -202,7 +203,7 @@ export function picturesOf(state: State, columns: number, nowMs: number, t: numb
   const headerAge = moving ? Math.min(sinceSwitch, entryAge({ look: state.options.look, boot: state.options.boot, ...state.pane }, nowMs, BOOT_MIN_MS) ?? Infinity) : Infinity
 
   if (state.view === 'menu') {
-    const project = state.cwd.split('/').filter(Boolean).at(-1) ?? ''
+    const project = baseOf(state.cwd)
 
     pictures.set('header', state.options.look === 'bbs' ? fitHeader(columns, size => bannerPicture(project, size, light, headerAge), 72) : headerPicture(`◆ ruflo v${CONSOLE_VERSION}${getBuild() === '' ? '' : ` · ${getBuild()}`} · ${project}`, Math.min(width, 64), light))
     // The palette strip above the menu's groups moves while the frame loop runs; with fps 0 it is the still strip (the light is off it).

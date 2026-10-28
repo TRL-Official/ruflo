@@ -20,7 +20,7 @@
 import { EventEmitter } from 'events';
 import { spawn, ChildProcess, execFileSync } from 'child_process';
 import { createServer, Server, request as httpRequestFn } from 'http';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -256,6 +256,27 @@ function raisedRateLimits(options: Pick<MCPServerOptions, RateLimitOption>): Rat
     raised.push('rateLimitWindowMs');
   }
   return raised;
+}
+
+/**
+ * The bearer token a token-less `mcp start -t http|websocket` falls back to, so that a loopback
+ * server is never open to every local process. Kept in `~/.claude-flow/mcp-http-token` (mode 0600)
+ * so clients can read it; created on first use. Exported for tests.
+ */
+export function ensureDefaultMcpToken(homeDir: string = os.homedir()): { token: string; file: string } {
+  const dir = path.join(homeDir, '.claude-flow');
+  const file = path.join(dir, 'mcp-http-token');
+  try {
+    const existing = fs.readFileSync(file, 'utf8').trim();
+    if (AUTH_TOKEN_PATTERN.test(existing)) return { token: existing, file };
+  } catch {
+    // none yet
+  }
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const token = randomBytes(32).toString('hex');
+  fs.writeFileSync(file, token + '\n', { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  return { token, file };
 }
 
 /** Printable ASCII without space (RFC 6750 token-ish), 16-512 chars. */
@@ -1051,11 +1072,6 @@ export class MCPServerManager extends EventEmitter {
     // Authorization gate first, before any import or bind: a refused start must
     // not depend on (or touch) anything else.
     const authToken = this.options.authToken || undefined;
-    if (authToken && this.options.transport !== 'http') {
-      // The standalone websocket transport has no working token check, so a
-      // token there would be a false promise of protection.
-      throw new Error('An MCP HTTP auth token is only supported with --transport http');
-    }
     if (shouldRefuseUnauthenticatedHttp(this.options.host, process.env, !!authToken)) {
       // No ToolAuthorizer is wired below: @claude-flow/mcp's tool-call
       // authorization is fully opt-in (requireToolAuthorization/toolAuthorizer),
@@ -1147,6 +1163,7 @@ export class MCPServerManager extends EventEmitter {
         auth: authToken
           ? { enabled: true, method: 'token', tokens: [authToken] }
           : undefined,
+        allowUnauthenticated: isUnauthenticatedHttpAllowed(),
       },
       logger
     );

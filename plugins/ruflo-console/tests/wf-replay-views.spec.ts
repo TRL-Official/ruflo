@@ -223,11 +223,12 @@ describe('saved views', () => {
     expect(savedFor('/work/proj').saved.pins).toEqual([])
   })
 
-  it('forgets only through the confirm card', () => {
+  it('forgets only through the confirm card', async () => {
     const w = world()
 
     press(w.page(), 'wf-saved-fold')
     press(w.page(), 'wf-saved-forget')
+    await new Promise<void>(resolve => setTimeout(resolve, 0)) // the write flavor is awaited before the card is built
     expect(asked[0]).toMatchObject({ argv: ['rm', '-f', '--', '/work/proj/.claude-flow/console/wf-views.json'], declared: 'delete' })
   })
 

@@ -107,6 +107,28 @@ export const progressOf = (mission: MissionRecord, tasks: readonly TaskRecord[])
   return { done: [...status.values()].filter(value => value === 'done').length, total: mission.tasks.length }
 }
 
+/** Whether the mission is over: cancelled, or every task done in the task store (a mission with no tasks is not). The record's own state is not read: it stays `planned` until the executor exists. */
+export function isOver(mission: MissionRecord, tasks: readonly TaskRecord[]): boolean {
+  const { done, total } = progressOf(mission, tasks)
+
+  return mission.cancelled || (total > 0 && done >= total)
+}
+
+/**
+ * The mission the goal on screen belongs to, or null when that goal still has to become one. The active mission stays active until another is
+ * created, so one that is over (finished in the task store, or cancelled) must not stand in for a goal planned after it: that goal gets its own
+ * create, and only the person's press creates it. A finished mission's own goal still belongs to it, since its plan stays on screen after the
+ * create and a second create would only duplicate it; a cancelled mission's does not, so it can be tried again.
+ */
+export function missionOfGoal(state: State): MissionRecord | null {
+  const mc = mcOf(state)
+  const mission = activeMission(state)
+
+  if (mission === null || mc.planned === null || !isOver(mission, state.snapshot?.tasks ?? [])) return mission
+
+  return mission.cancelled || mc.goal !== mission.objective ? null : mission
+}
+
 /** How many of the mission's tasks the ruflo task store shows as failed. */
 export const failedOf = (mission: MissionRecord, tasks: readonly TaskRecord[]): number => [...derive(mission, tasks).values()].filter(value => value === 'failed').length
 

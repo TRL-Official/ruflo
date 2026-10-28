@@ -241,8 +241,19 @@ export const READERS = { claude: claudeRows, codex: codexRows, grok: grokRows };
 
 /** True when `row.project` is `project` itself or a directory inside it (a trailing slash on `project` is ignored). */
 export function inProject(row, project) {
-  const root = project.length > 1 ? project.replace(/\/+$/, '') : project;
   const at = typeof row.project === 'string' ? row.project : '';
+
+  // A Windows path (drive-lettered; either separator, any letter case) compares as `c:/users/x`: transcripts write `C:\Users\x`,
+  // and the caller may pass `C:/Users/x` or a different drive-letter case.
+  if (/^[A-Za-z]:[\\/]/.test(project) || /^[A-Za-z]:[\\/]/.test(at)) {
+    const flat = path => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const here = flat(at);
+    const there = flat(project);
+
+    return here === there || here.startsWith(`${there}/`);
+  }
+
+  const root = project.length > 1 ? project.replace(/\/+$/, '') : project;
 
   return at === root || at.startsWith(`${root}/`);
 }

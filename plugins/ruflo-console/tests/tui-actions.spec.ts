@@ -4,10 +4,11 @@
  * on screen. A paste, a half-drawn card, another key or a different card never run it. Run with
  *   npx vitest run plugins/ruflo-console/tests/tui-actions.spec.ts
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { runTui, type TuiIO } from '../tui/run'
 import { RUFLO_FILES } from './fixtures/ruflo-run'
@@ -30,9 +31,15 @@ beforeAll(() => {
   cli = join(root, 'cli.js')
   writeFileSync(cli, `require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n'); console.log('stub ran: ' + process.argv.slice(2).join(' '))\n`)
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 const settle = (ms = 250) => new Promise(resolve => setTimeout(resolve, ms))
+/** Polls until `done` holds, at most `limit` ms (the assertion that follows says what was missing). */
+const until = async (done: () => boolean, limit = 10_000): Promise<void> => {
+  const end = Date.now() + limit
+
+  while (!done() && Date.now() < end) await settle(50)
+}
 const strip = (text: string) => text.replace(/\u001b\[[0-9;?<]*[A-Za-z]/g, '')
 /** The commands the CLI stand-in was given, minus the console's own background reads (--version, memory stats, doctor …). */
 const ran = (): string[][] => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]) : []).filter(argv => argv.some(word => word === 'stop' || (word === 'worker' && argv.includes('list'))))
@@ -90,7 +97,11 @@ describe('a change asked for by name', () => {
 
     await ask(t, 'swarm-stop')
     t.press('y')
-    await settle(600)
+    // runner.ts re-checks the verify once at VERIFY_RETRY_MS (1 s) when a confirmed action's start
+    // succeeded but its state file is not on disk yet (#4036 bullet 2); the stand-in CLI's state
+    // never changes here, so the whole re-check window has to resolve before the verdict is drawn. Wait for the verdict itself, not for a fixed
+    // 1.2 s: under CPU contention (a full parallel run) the 1 s retry plus the redraw outlasts it.
+    await until(() => t.screen().includes('stop the swarm: ruflo answered ok'))
 
     const after = ran().slice(before)
 
@@ -169,7 +180,7 @@ describe('what is not an action', () => {
     const { t, running } = await started()
 
     await ask(t, 'auto-workers-list')
-    await settle(500)
+    await until(() => ran().length > before) // the stand-in CLI is a process start: slower than a fixed 500 ms on a loaded or Windows machine
     expect(t.screen()).not.toContain('CONFIRM NEEDED')
     expect(ran().slice(before)[0]).toEqual(expect.arrayContaining(['worker', 'list']))
     t.press('q')

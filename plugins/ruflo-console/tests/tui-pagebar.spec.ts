@@ -3,10 +3,11 @@
  * console view the session last showed, and the AI page is not a console view, so on page 6 the bar kept the previous page lit.
  *   npx vitest run plugins/ruflo-console/tests/tui-pagebar.spec.ts
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { runTui, type TuiIO } from '../tui/run'
 import { TUI_VIEWS } from '../tui/session'
@@ -25,7 +26,7 @@ beforeAll(() => {
     writeFileSync(join(project, path), body)
   }
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 function terminal(columns = 100, rows = 30) {
   const out: string[] = []

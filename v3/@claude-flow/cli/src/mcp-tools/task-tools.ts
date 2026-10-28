@@ -242,7 +242,9 @@ export const taskTools: MCPTool[] = [
       // Apply filters
       if (input.status) {
         // Support comma-separated status values. 'all' (sent by `status tasks`) means no status filter.
-        const statuses = (input.status as string).split(',').map(s => s.trim());
+        // Each value goes through statusOf, the reader task_update uses, so "done", "canceled",
+        // "running" or "Completed" match the stored status rather than matching nothing.
+        const statuses = (input.status as string).split(',').map(s => s.trim()).map(s => statusOf(s) ?? s);
         if (!statuses.includes('all')) {
           tasks = tasks.filter(t => statuses.includes(t.status));
         }

@@ -5,6 +5,7 @@ import type { MemoryStats } from '../data/cli'
 import type { StartId } from '../starts'
 import { brainStatusOf, BRAIN_REPO, statusLine as groundingLine } from '../grounding'
 import { settingsOf } from '../settings'
+import { tailOf } from '../data/paths'
 import { controlRows, isControlActive } from './control'
 import { optimizerRows } from './optimizer'
 import { uniqueAgents } from '../data/swarm-status'
@@ -31,7 +32,7 @@ export function overviewView(ctx: Ctx): RenderElement {
     kv(
       ctx,
       'project',
-      snap === null ? 'reading…' : snap.isRufloProject ? `ruflo state in ${state.cwd.split('/').slice(-2).join('/')}` : 'n/a — no .claude-flow here (see Get going below)',
+      snap === null ? 'reading…' : snap.isRufloProject ? `ruflo state in ${tailOf(state.cwd)}` : 'n/a — no .claude-flow here (see Get going below)',
       snap?.isRufloProject === true ? THEME.ok : undefined,
     ),
   )

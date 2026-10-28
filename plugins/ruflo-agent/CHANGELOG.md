@@ -2,6 +2,22 @@
 
 Newest first. One `## <version> — <date>` heading per version, then `feat:`, `fix:`, `breaking:` and `chore:` bullets (ADR-478). Built from git history; this is the whole history.
 
+## 0.4.1 — 2026-10-25
+- fix: the dynamic-workflow guard now reads call arguments wrapped as `tool_input`, `params`, `args` or `parameters` (as well as `input` and `arguments`), and refuses a wrapper that is not an object or two competing wrappers; before, an unrecognised wrapper was read as a flat envelope with no policy fields and the call was allowed
+- fix: a session, thread or environment id of `.` or `..` is refused before any request is sent (`encodeURIComponent` leaves it unchanged, so `/v1/sessions/..` would have resolved to `/v1/`)
+
+## 0.4.0 — 2026-10-24
+- feat: verified feedback cycles, independent host verification, atomic admission and isolated native memory with replay and policy checks
+- fix: `managed_agent_prompt` could report the previous turn's answer as finished on a later poll while the new turn was still running; only events from the acknowledged message onward are tracked
+- fix: `managed_agent_interrupt` now goes through the same host policy, session allowlist and fresh provider-state check as `managed_agent_control` (it had no gate); `managed_agent_terminate` obeys the allowlist, and deletes only the session's own environment, once `RUFLO_MANAGED_CONTROL=1` (default behaviour unchanged)
+- fix: verifier receipts must use the canonical base64 spelling of the signature; other spellings of the same bytes verified yet were stored as separate records, which could fill the 500-record ledger
+- fix: a failed local snapshot write no longer fails a successful provider read or a completed session deletion, and a prompt that fails after it was sent now reports its `messageId` so a retry does not send it twice
+- chore: the API-key scope marker is a keyed digest under a per-process random key, never a bare hash of the key
+- fix: hydrate native memory search previews before authenticating recalled managed workflow receipts; verified through ruOS process restart
+- feat: shared managed run collection, policy checked controls and verified advisory learning with native evidence memory bridge
+- feat: managed workflow capability discovery, bounded local mod policy and console policy metadata
+- fix: ship the managed workflow integration through a versioned plugin update
+
 ## 0.3.4 — 2026-10-12
 - fix: the shared text screen now catches `.env` and e-mailed credentials, no longer flags a model's token talk (`--max-tokens`, `/oauth/token`, "token usage"), and no longer flags values that only name where a secret lives (`./service-account.json`, `--set-secrets=NAME=NAME:latest`); every rule stays linear (#4094, thanks @proffesor-for-testing)
 

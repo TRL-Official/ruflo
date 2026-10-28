@@ -1542,12 +1542,15 @@ export const memoryTools: MCPTool[] = [
         } catch { /* namespace may not exist */ }
       }
 
-      // Sort by score, deduplicate by key, take top N
+      // Sort by score, deduplicate by (namespace, key), take top N. An entry is
+      // identified by both (see #2271), so the same key in another namespace is
+      // a different entry and must not be dropped as a duplicate.
       allResults.sort((a, b) => b.score - a.score);
       const seen = new Set<string>();
       const deduplicated = allResults.filter(r => {
-        if (seen.has(r.key)) return false;
-        seen.add(r.key);
+        const id = JSON.stringify([r.namespace, r.key]);
+        if (seen.has(id)) return false;
+        seen.add(id);
         return true;
       }).slice(0, limit);
 

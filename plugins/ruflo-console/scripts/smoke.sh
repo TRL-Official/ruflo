@@ -11,9 +11,9 @@ step() { printf "→ %s ... " "$1"; }
 ok()   { printf "PASS\n"; PASS=$((PASS+1)); }
 bad()  { printf "FAIL: %s\n" "$1"; FAIL=$((FAIL+1)); }
 
-step "1. plugin.json declares ruflo-console 0.44.7"
+step "1. plugin.json declares ruflo-console 0.49.7"
 grep -q '"name": "ruflo-console"' "$ROOT/.claude-plugin/plugin.json" \
-  && grep -q '"version": "0.44.7"' "$ROOT/.claude-plugin/plugin.json" && ok || bad "name/version"
+  && grep -q '"version": "0.49.7"' "$ROOT/.claude-plugin/plugin.json" && ok || bad "name/version"
 
 step "2. hooks.json names exactly one module and no classic hook commands"
 grep -q '"modules": \["./register.ts"\]' "$HOOKS/hooks.json" && ! grep -q '"command"' "$HOOKS/hooks.json" \
@@ -132,6 +132,14 @@ brain_calls=$(grep -nE "toolCall|toolCheck|\\\$\\.tool|\\.run\\(|spawn|fetchText
 brain_ids=$(grep -rnE "mcp__plugin_ruvnet|plugin_ruvnet-brain" "$HOOKS" || true)
 brain_files=$(find "$ROOT" -iname '*ruvnet-brain*' -not -path '*/node_modules/*' 2>/dev/null || true)
 [[ -z "$brain_calls" && -z "$brain_ids" && -z "$brain_files" ]] && ok || bad "calls: $brain_calls ids: $brain_ids files: $brain_files"
+
+step "21. Claude Code's own plugin validator accepts the plugin (a module it refuses, such as a computed \$.env.get name, stops the mod from loading and /ruflo is missing); skipped where the CLI is not installed"
+if command -v claude >/dev/null 2>&1; then
+  validate_out=$(claude plugin validate "$ROOT" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+  if printf '%s\n' "$validate_out" | grep -q 'Validation passed'; then ok; else bad "$(printf '%s\n' "$validate_out" | grep -m1 -E '✘|error' | cut -c1-200)"; fi
+else
+  printf "SKIP (no claude CLI) "; ok
+fi
 
 printf "\n%d passed, %d failed\n" "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

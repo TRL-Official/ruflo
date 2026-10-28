@@ -6,6 +6,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function gitDir(start: string): string | null {
@@ -24,9 +25,21 @@ function gitDir(start: string): string | null {
   }
   return null;
 }
+// [neon-direct] A gate runs in a THROWAWAY schema (never rvdirect / sq_*), and some provoke store errors on purpose
+// (embed-vec-test: a row with the embedding marker and no vector). Their notes went to the LIVE checkout's file and the
+// next prompt reported a Neon failure that never happened. A failure under a schema that is not the live one is noted
+// in a scratch file of its own (ported from digital-twin's neon-alert.cjs, 2026-10-22 rule; ported 2026-10-28).
+function liveSchemas(g: string | null): { rv: string; sq: string } {
+  let c: any = {};
+  try { c = JSON.parse(fs.readFileSync(path.join(path.dirname(g || '.'), '.claude', 'neon-direct.json'), 'utf8')); } catch { /* defaults */ }
+  return { rv: c.rvSchema || 'rvdirect', sq: c.sqlPrefix || 'sq_' };
+}
 export function file(): string | null {
   if (process.env.NEON_ALERT_FILE) return process.env.NEON_ALERT_FILE;
   const g = gitDir(process.env.REPO_ROOT || process.env.DIGITAL_TWIN_ROOT || process.cwd());
+  const live = liveSchemas(g), rv = process.env.RVN_SCHEMA, sq = process.env.NEON_SQL_SCHEMA_PREFIX;
+  const test = (rv && rv !== live.rv) ? rv : (sq && sq !== live.sq) ? sq : null;
+  if (test) return path.join(os.tmpdir(), `neon-alert-${test.replace(/[^A-Za-z0-9_]/g, '')}.json`);
   return g ? path.join(g, '.neon-alert.json') : null;
 }
 // connection strings and passwords never reach the note

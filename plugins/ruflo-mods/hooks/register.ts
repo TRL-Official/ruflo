@@ -2,12 +2,14 @@ import type { Register } from 'claude-code'
 
 import { registerAgents } from './agents'
 import { registerCompact } from './compact'
+import { registerCompactSnapshot } from './compact-snapshot'
 import { registerCost } from './cost'
 import { registerDelivery } from './delivery'
 import { registerDescribe } from './describe'
 import { registerGuard } from './guard'
 import { createGuidance } from './guidance'
 import { registerLearn } from './learn'
+import { registerLoop } from './loop'
 import { registerNoun } from './noun'
 import { readOptions } from './options'
 import { registerProbe } from './probe'
@@ -50,4 +52,6 @@ export const register: Register = (on, options) => {
   if (opts.deliveryScreen) registerDelivery(on, state)
   if (opts.compactCarry) registerCompact(on, state)
   if (opts.rureOffer) registerRureOffer(on, state)
+  if (opts.learningLoop) registerLoop(on, state)
+  if (opts.compactSnapshot) registerCompactSnapshot(on, state)
 }

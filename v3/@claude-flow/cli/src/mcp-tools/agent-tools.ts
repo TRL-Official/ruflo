@@ -288,7 +288,7 @@ export const agentTools: MCPTool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        agentType: { type: 'string', description: 'Type of agent to spawn' },
+        agentType: { type: 'string', description: 'Type of agent to spawn (a legacy `type` key is accepted as an alias)' },
         agentId: { type: 'string', description: 'Optional custom agent ID' },
         name: { type: 'string', description: 'Optional display name for the agent (shown by agent_list, agent_status and ruflo-console)' },
         // #2085 — accept swarmId so spawned agents register in the
@@ -308,7 +308,19 @@ export const agentTools: MCPTool[] = [
       },
       required: ['agentType'],
     },
-    handler: async (input) => {
+    handler: async (rawInput) => {
+      // #4542: agent and command docs that `init` installed before 3.63.7 call
+      // agent_spawn with `type`. Accept it as an alias for `agentType`, and
+      // name the missing key ourselves: validateAgentSpawn maps agentType onto
+      // the security schema's `type` field and would report "type: Required".
+      let input = rawInput;
+      if (input.agentType === undefined && typeof input.type === 'string') {
+        const { type, ...rest } = input;
+        input = { ...rest, agentType: type };
+      }
+      if (typeof input.agentType !== 'string' || input.agentType === '') {
+        return { success: false, error: 'Input validation failed: agentType is required and must be a non-empty string (for example agentType: "coder")' };
+      }
       // Validate user-provided input (#1425: wire security validators to runtime)
       const validation = await validateAgentSpawn(input);
       if (!validation.valid) {
@@ -701,7 +713,7 @@ export const agentTools: MCPTool[] = [
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['status', 'scale', 'drain', 'fill'], description: 'Pool action' },
-        targetSize: { type: 'number', description: 'Target pool size (for scale action)' },
+        targetSize: { type: 'number', description: 'Target pool size (scale: grow or shrink to it; fill: grow to it, never shrink)' },
         agentType: { type: 'string', description: 'Agent type filter' },
       },
       required: ['action'],
@@ -750,7 +762,9 @@ export const agentTools: MCPTool[] = [
         };
       }
 
-      if (action === 'scale') {
+      // #4555: fill was advertised in the enum but had no branch. It is scale
+      // without the shrink step: grow agentType's pool to targetSize, never terminate.
+      if (action === 'scale' || action === 'fill') {
         const targetSize = input.targetSize === undefined ? 5 : input.targetSize;
         if (typeof targetSize !== 'number' || !Number.isSafeInteger(targetSize) || targetSize < 0) {
           return { action, error: 'targetSize must be a non-negative safe integer' };
@@ -775,7 +789,7 @@ export const agentTools: MCPTool[] = [
             };
             added.push(agentId);
           }
-        } else if (delta < 0) {
+        } else if (delta < 0 && action === 'scale') {
           const toRemove = agents.filter(a => a.agentType === agentType && a.status === 'idle').slice(0, -delta);
           for (const agent of toRemove) {
             store.agents[agent.agentId].status = 'terminated';

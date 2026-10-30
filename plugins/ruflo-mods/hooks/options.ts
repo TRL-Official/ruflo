@@ -11,12 +11,15 @@ export type ModOptions = {
   readonly statusLine: boolean
   readonly costBudgetUsd?: number
   readonly costHardStop: boolean
+  readonly costLedger: boolean
   readonly toolHints: boolean
   readonly agentTrim: boolean
   readonly agentTrimKeep: ReadonlySet<string>
   readonly deliveryScreen: boolean
   readonly compactCarry: boolean
+  readonly compactSnapshot: boolean
   readonly rureOffer: boolean
+  readonly learningLoop: boolean
   readonly capabilityProbe: boolean
   readonly sessionRollup: boolean
   readonly sessionAttention: boolean
@@ -46,12 +49,15 @@ export function readOptions(options: PluginOptions | undefined): ModOptions {
     statusLine: bool(o.statusLine, true),
     costBudgetUsd: budgetOf(o.costBudgetUsd),
     costHardStop: bool(o.costHardStop, false),
+    costLedger: bool(o.costLedger, true),
     toolHints: bool(o.toolHints, false),
     agentTrim: bool(o.agentTrim, false),
     agentTrimKeep: keepNames(o.agentTrimKeep),
     deliveryScreen: bool(o.deliveryScreen, false),
     compactCarry: bool(o.compactCarry, false),
+    compactSnapshot: bool(o.compactSnapshot, true),
     rureOffer: bool(o.rureOffer, false),
+    learningLoop: bool(o.learningLoop, true),
     capabilityProbe: bool(o.capabilityProbe, false),
     sessionRollup: bool(o.sessionRollup, false),
     sessionAttention: bool(o.sessionAttention, false),

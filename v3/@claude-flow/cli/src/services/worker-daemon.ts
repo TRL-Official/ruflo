@@ -1790,14 +1790,21 @@ export class WorkerDaemon extends EventEmitter {
     const audit = {
       timestamp: new Date().toISOString(),
       mode: 'local',
+      // This fallback performs file-presence checks only. It must not report
+      // a clean secret scan or a low risk level it did not actually establish:
+      // the worker runs by default at critical priority, so a fabricated
+      // noHardcodedSecrets/riskLevel pair is a believable false negative.
+      scanned: false,
       checks: {
         envFilesProtected: !existsSync(join(this.projectRoot, '.env.local')),
         gitIgnoreExists: existsSync(join(this.projectRoot, '.gitignore')),
-        noHardcodedSecrets: true, // Would need actual scanning
+        noHardcodedSecrets: null,
       },
-      riskLevel: 'low',
-      recommendations: [],
-      note: 'Install Claude Code CLI for AI-powered security analysis',
+      riskLevel: 'unknown',
+      recommendations: [
+        'No secret scan or code analysis was performed by the local fallback; install Claude Code CLI for AI-powered security analysis.',
+      ],
+      note: 'Local fallback checks file presence only; it does not scan source contents.',
     };
 
     writeFileSync(auditFile, JSON.stringify(audit, null, 2));

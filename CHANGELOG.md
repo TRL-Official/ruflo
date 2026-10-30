@@ -5,6 +5,117 @@ All notable changes to the Ruflo project (formerly Claude Flow) are documented h
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.65.0] - 2026-10-30
+
+Minor release: `@claude-flow/cli`, `claude-flow`, `ruflo` 3.65.0, plus ruflo-mods plugin 0.12.0. This release ships the eight follow-ups to #4581 on how ruflo integrates with Claude Code mods (ADR-503 to ADR-510, #4585).
+
+### Added
+- **Learning-loop gaming defences** (ADR-503, #4590).
+  - A verified-success turn is tainted when it edited tests (`edited-tests`), edited a verifier's config (`edited-verifier-config`), or ran a narrowed or weakened check (`narrowed-verifier`).
+  - Tainted records never train unless `.claude-flow/config.json` `learningLoop.allowTaint` lists their classes.
+  - An opt-in rotating re-verify step (`learningLoop.reverify`, off by default) re-runs an allowlisted check in a temporary worktree.
+  - An anomaly gate holds back lessons whose evidence looks gamed.
+  - `scripts/eval-learning-loop.mjs` is a manual, paid evaluation harness.
+- **Real-binary test tier** (ADR-504, #4589). This runs the real `claude` binary with ruflo-mods against a scripted mock of the Anthropic Messages API, with no API key needed. The contracts check that:
+  - every mod loads;
+  - the learning loop records outcomes;
+  - lessons reach the model;
+  - the guard denies risky commands;
+  - route context is added.
+  
+  It runs as the CI job `mods-real-binary` and as `npm run test:real-binary`.
+- **`compactSnapshot`** (ruflo-mods option, default on; ADR-505, #4591).
+  - Before compaction, the mod saves a screened transcript to rotating slots under `.claude-flow/sessions/compactions/`.
+  - After compaction, it adds one bounded `[RUFLO_AFTER_COMPACT]` block with recent lessons and outcomes, open swarm and claim ids, and the snapshot path.
+  - `ruflo doctor --component compact-snapshots` warns when snapshots exist but `.claude-flow/` is not gitignored.
+- **Plugin secrets via `userConfig` `sensitive: true`** (ADR-506, #4587).
+  - The cost-tracker, metaharness and x-gateway plugins read their keys through a shared `readSecret` helper. It checks the masked plugin option first and falls back to the environment.
+  - A new `scripts/audit-plugin-secrets.mjs` CI gate fails on secret-named options that are not marked sensitive, and on literal secrets in manifests.
+- **Plugin footprint cut** (ADR-507, #4588).
+  - Operational skills are user-invoked only (`disable-model-invocation: true`).
+  - Long skill and command descriptions are trimmed to one sentence, with a ceiling enforced by an audit.
+  - `scripts/measure-plugin-footprint.mjs` reports the result, with before and after numbers in `v3/docs/validation/`.
+- **Cost budgets that can feed a gateway** (ADR-508, #4592).
+  - `.claude-flow/cost/budget.json` holds the budget windows.
+  - `ruflo cost budget set` writes it.
+  - `ruflo cost budget export --gateway litellm [--apply]` produces LiteLLM `budget_limits` and per-model budget fallbacks. `--apply` requires HTTPS except on loopback, and reads the key from an environment variable only.
+  - `ruflo cost report` breaks spend down by agent and by tool.
+  - New ruflo-mods option `costLedger` (default on).
+  - `--gateway meta-llm` refuses until meta-llm documents a budget API.
+- **Plugin trust** (ADR-509, #4593).
+  - Plugins carry Ed25519 `signature.json` manifests, signed with the existing helpers key.
+  - `ruflo plugins verify` checks a plugin against its manifest and reports verified, modified, unsigned or bad-signature.
+  - A static scan runs before `mods install`, `init` or `plugins install`. A high finding stops the install unless you pass `--accept-risk <plugin>`.
+  - `ruflo init` stops on risky project auto-approve keys (`enableAllProjectMcpServers`, `bypassPermissions`, wildcard Bash and others). `--keep-risky-settings` and `--drop-risky-settings` let you continue.
+  - Under `modTrust: refuse-risky`, a modified ruflo plugin is refused.
+- **Headless plugin staging** (ADR-510, #4586).
+  - `resolvePluginPaths` finds ruflo plugins in a local checkout, the marketplace clone or the install cache.
+  - Headless `claude -p` workers now get `--plugin-dir` for ruflo-mods automatically.
+  - `ruflo plugins paths [--json]` prints the resolved folders for Agent SDK `{ type: "local", path }` callers.
+  - `ruflo doctor --component headless-plugins` checks this setup.
+
+### Not yet
+- Per-skill trimming (`skillTrim`) was not built: Claude Code exposes no hook that hides a skill from the model's list.
+- The 30-task learning-loop evaluation from #4581 §7 has still not been run. The loop stays on by default, as the maintainers decided in ADR-502 §6.
+
+## [3.64.0] - 2026-10-29
+
+Minor release: `@claude-flow/cli`, `claude-flow`, `ruflo` 3.64.0; ruflo-mods plugin 0.8.0.
+
+### Added
+- **Verified-outcome learning loop** (#4581, #4583, ADR-502), **on by default** (ruflo-mods `learningLoop`; set it to `false` to turn it off).
+  - The mod records each main-loop turn. Its outcome is decided only by the exit status of a test, build, typecheck or lint command run after the turn's last edit.
+  - `|| true`, pipes and `;` verify nothing, and the model's own words are never read.
+  - `ruflo hooks verified-ingest`, the MCP tool `hooks_intelligence_verified-ingest`, and automatic ingest in `hooks_route` and `hooks_session-end` all train SONA on verified turns only. Unverified turns are counted and never trained.
+  - Learned lessons at or above the 0.6 routing gate are written to `.claude-flow/data/learned-lessons.json`. The mod cites at most three of them in a prompt they match.
+  - `ruflo doctor --component learning-loop` reports whether outcomes are reaching SONA.
+
+### Not yet
+- #4581 stages 5–7 (console pane, autonomous `/loop-run`, GEPA self-tuning) are not built.
+- The #4581 §7 evaluation (30+ tasks, baseline vs loop-enabled) has not been run; the default is on by maintainer decision ahead of it (ADR-502 §6).
+
+## [3.63.9] - 2026-10-29
+
+Patch release: `@claude-flow/cli`, `claude-flow`, `ruflo` 3.63.9.
+
+### Security
+
+- `github_repo_analyze` no longer returns credentials embedded in the origin remote. A remote such as `https://x-access-token:<token>@github.com/...` was echoed verbatim in `remoteUrl`, putting the token into tool output. URL userinfo is now stripped; scp-form remotes (`git@host:o/r`) are unchanged (#4577).
+
+### Fixed
+
+- `migrate run --dry-run` and `migrate fix --agents --dry-run` (or `-d`) preview instead of migrating. Both read a flag key the parser never set, so a dry run overwrote `.claude-flow/config.json` and wrote restored agent files (#4568).
+- `github_repo_analyze` reads repository names that contain a dot (`vercel/next.js`, `socketio/socket.io`) from the origin remote instead of filing them all under `local/repo` (#4571).
+- `hooks_worker-detect` with `autoDispatch` marks its worker records and response as `synthetic` with a note, instead of reporting a completed worker when no executor ran (#4576).
+
+### Changed
+
+- The `agentic-qe-fleet` marketplace entry is pinned to Agentic QE v3.15.17 (#4574).
+
+## [3.63.8] - 2026-10-28
+
+Patch release: `@claude-flow/cli`, `claude-flow`, `ruflo` 3.63.8, plus standalone `@claude-flow/memory` 3.1.0.
+
+### Fixed
+
+- `@claude-flow/memory` 3.1.0 adds `ControllerRegistry.set()`. The CLI's memory bridge already called it to register controllers it builds itself, but the method did not exist, so those registrations were silently dropped. `set()` closes any instance it replaces. The agentdb the CLI installs (3.0.0-alpha.20) does not ship the MutationGuard, AttestationLog or GuardedVectorBackend files, so those stay off. What does change: when agentdb's own ReasoningBank is unavailable, the intelligence module's local ReasoningBank is now really registered (#4549, #4550).
+- `agentdb_pattern-store` and `agentdb_pattern-search` use the same backend when that local ReasoningBank is registered. Before, the store wrote to the SQL `pattern` namespace while search read the local bank, so a stored pattern could not be found once the bank held other patterns. Search also falls back to the SQL namespace when the bank has no match (#4567).
+
+## [3.63.7] - 2026-10-28
+
+Patch release: `@claude-flow/cli`, `claude-flow`, `ruflo` 3.63.7.
+
+### Fixed
+
+- `agent_spawn` accepts `type` as an alias for `agentType`, so projects set up with older agent and command docs can spawn agents again. `agentType` wins when both are sent. A call with neither now says `agentType is required` instead of `type: Required`. 443 `agent_spawn` calls in the shipped agent, command and skill docs now pass `agentType` (#4542, #4543, #4564).
+- `coordination_sync` `trigger` refuses instead of waiting 50 ms and reporting a sync that never happened. The tool's description now says so (#4557, #4559, #4564).
+- `agent_pool` `fill` is implemented instead of returning "Unknown action" (#4555, #4561).
+- `hooks_build-agents` writes under the project, validates `outputDir`, and no longer reports invented stats (#4558, #4562).
+- `performance_metrics` reports recorded latency and throughput instead of fixed figures (#4554, #4556).
+- The daemon's local audit worker no longer reports a clean scan it did not run (#4563).
+- `session_info` and `session_current` read the session records that hooks write (#4548).
+- The GitHub skills use registered MCP tools (#4141, #4541). A new check fails when a shipped skill runs a CLI command that does not exist (#4552, #4553).
+
 ## [3.63.6] - 2026-10-27
 
 Patch release: `@claude-flow/cli`, `claude-flow`, `ruflo` 3.63.6.
@@ -12,6 +123,7 @@ Patch release: `@claude-flow/cli`, `claude-flow`, `ruflo` 3.63.6.
 ### Fixed
 
 - ruflo-console 0.49.7: Claude can clear Project Anatole alerts through the console again. Before, `console_run anatole-ack-<id>` failed with "command.run: called from a tool.call hook, it would wait on the turn this hook is holding", so every alert stayed open. The console now sends `/protector` without waiting inside Claude's tool call, and Claude's reply says the action is queued. The ack is applied when the turn ends (#4545).
+- `claims_rebalance` no longer overfills one agent (#4547).
 - `@claude-flow/aidefence` is declared as an optional dependency of the CLI (#4445).
 - The hooks-automation skill uses the `hooks` command and the real MCP tool names (#4538, #4540).
 

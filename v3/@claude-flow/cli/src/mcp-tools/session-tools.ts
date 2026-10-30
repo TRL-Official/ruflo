@@ -81,6 +81,22 @@ function ensureSessionDir(): void {
   }
 }
 
+/**
+ * The session hook (`session.js` from init/helpers-generator.ts) writes its
+ * records into this same directory: `current.json` and `session-<n>.json`
+ * archives shaped `{ id, startedAt, ... }` rather than session_save's
+ * `{ sessionId, name, savedAt, stats }`. Read the id and time from either shape
+ * (ADR-093 F6), falling back to the file's own id.
+ */
+function sessionIdentity(session: SessionRecord, fileId: string): { sessionId: string; savedAt: string } {
+  const raw = session as unknown as Record<string, unknown>;
+  const pick = (...values: unknown[]) => values.find((v): v is string => typeof v === 'string' && v !== '');
+  return {
+    sessionId: pick(raw.sessionId, raw.id) ?? fileId,
+    savedAt: pick(raw.savedAt, raw.startedAt) ?? '',
+  };
+}
+
 function loadSession(sessionId: string): SessionRecord | null {
   try {
     const path = getSessionPath(sessionId);
@@ -662,13 +678,14 @@ export const sessionTools: MCPTool[] = [
       if (session) {
         const path = getSessionPath(sessionId);
         const stat = statSync(path);
+        const identity = sessionIdentity(session, sessionId);
 
         return {
-          sessionId: session.sessionId,
-          name: session.name,
+          sessionId: identity.sessionId,
+          name: session.name ?? identity.sessionId,
           description: session.description,
-          savedAt: session.savedAt,
-          stats: session.stats,
+          savedAt: identity.savedAt,
+          stats: session.stats ?? null,
           fileSize: stat.size,
           path,
           hasData: {
@@ -705,12 +722,13 @@ export const sessionTools: MCPTool[] = [
       const sessionId = newest.replace(/\.json$/, '');
       const session = loadSession(sessionId);
       if (!session) return { sessionId, status: 'unknown', startedAt: '', error: 'Session file unreadable' };
+      const identity = sessionIdentity(session, sessionId);
       return {
-        sessionId: session.sessionId,
-        name: session.name,
+        sessionId: identity.sessionId,
+        name: session.name ?? identity.sessionId,
         status: 'active',
-        startedAt: session.savedAt,
-        stats: session.stats,
+        startedAt: identity.savedAt,
+        stats: session.stats ?? null,
       };
     },
   },

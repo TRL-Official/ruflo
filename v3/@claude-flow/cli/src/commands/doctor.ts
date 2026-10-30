@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { createHash } from 'crypto';
 import { ownInstallAncestors } from '../plugins/own-install.js';
 import { checkNativeAddonHeaders } from './doctor-native-addon.js';
+import { checkProjectAutoApproveSettings } from './doctor-auto-approve.js';
 import { execSync, exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { decodeKey, isEncryptionEnabled } from '../encryption/vault.js';
@@ -2389,6 +2390,25 @@ async function checkMods(): Promise<HealthCheck> {
     : { name: 'ruflo mods (ADR-404)', status: 'warn', message: warnings.map((f) => `${f.name}: ${f.message}`).join('; '), fix: 'ruflo mods doctor' };
 }
 
+// ADR-510: do ruflo mods run under `claude -p --plugin-dir` here? Spawns a
+// real (cheap) model call, so `--component headless-plugins` only.
+async function checkHeadlessPlugins(): Promise<HealthCheck> {
+  const { checkHeadlessPlugins: run } = await import('../mods/headless-check.js');
+  return run();
+}
+
+// #4581 / ADR-502: ruflo-mods learning loop — is it recording, and do its verified outcomes reach SONA? Warn-only.
+async function checkLearningLoop(): Promise<HealthCheck> {
+  const { learningLoopHealth } = await import('../memory/verified-outcomes.js');
+  return { name: 'Learning loop (#4581)', ...learningLoopHealth(process.cwd()) };
+}
+
+// ADR-505: ruflo-mods compaction snapshots hold conversation text; warn when they exist and git does not ignore them.
+async function checkCompactSnapshots(): Promise<HealthCheck> {
+  const { compactSnapshotHealth } = await import('../mods/compact-snapshots.js');
+  return { name: 'Compaction snapshots (ADR-505)', ...compactSnapshotHealth(process.cwd()) };
+}
+
 // Opt-in @ruvector/typesafe task router (optional peer). `--component typesafe` only.
 async function checkTypesafeRouter(): Promise<HealthCheck> {
   const name = '@ruvector/typesafe router';
@@ -2604,7 +2624,7 @@ export const doctorCommand: Command = {
     {
       name: 'component',
       short: 'c',
-      description: 'Check specific component (version, node, npm, config, daemon, memory, api, git, mcp, mcp-overhead, claude, browser, disk, typescript, agentic-flow, encryption, federation, funnel, proxy, auth, typesafe, mods, metaharness)',
+      description: 'Check specific component (version, node, npm, config, daemon, memory, api, git, mcp, mcp-overhead, claude, browser, disk, typescript, agentic-flow, encryption, federation, funnel, proxy, auth, typesafe, mods, headless-plugins, metaharness)',
       type: 'string'
     },
     {
@@ -2677,6 +2697,7 @@ export const doctorCommand: Command = {
       'browser': checkAgentBrowserVersion,
       'config': checkConfigFile,
       'stale-settings': checkStaleSettingsNpx, // #2448
+      'auto-approve': () => checkProjectAutoApproveSettings(), // ADR-509
       'helpers': helperCheck, // #3565
       'daemon': checkDaemonStatus,
       get memory() { return [
@@ -2714,6 +2735,9 @@ export const doctorCommand: Command = {
       'auth': checkAuth, // ADR-306
       'typesafe': checkTypesafeRouter, // opt-in @ruvector/typesafe task router
       'mods': checkMods, // ADR-404 — ruflo as a Claude Code mod
+      'learning-loop': checkLearningLoop, // #4581 — verified-outcome learning loop
+      'compact-snapshots': checkCompactSnapshots, // ADR-505 — snapshots must be gitignored
+      'headless-plugins': checkHeadlessPlugins, // ADR-510 — mods under claude -p (spawns claude; not in bare doctor)
     };
 
     if (component !== undefined && !Object.hasOwn(componentMap, component)) {
@@ -2811,6 +2835,7 @@ export const doctorCommand: Command = {
       checkGitRepo,
       checkConfigFile,
       checkStaleSettingsNpx, // #2448/#2677 — runaway `npx @latest` in settings
+      () => checkProjectAutoApproveSettings(), // ADR-509 — project auto-approve keys
       helperCheck, // #3565 — installed signed helpers vs manifest
       checkDaemonStatus,
       checkMemoryDatabase,
@@ -2836,6 +2861,8 @@ export const doctorCommand: Command = {
       checkProxySponsoredConsent, // ADR-313 — Meta LLM Proxy sponsored-downtime health
       checkAuth, // ADR-306 — Cognitum identity (warn-only; never fails bare `ruflo doctor`)
       checkMods, // ADR-404 — Claude Code mod path (warn-only)
+      checkLearningLoop, // #4581 — verified outcomes reach SONA (warn-only)
+      checkCompactSnapshots, // ADR-505 — compaction snapshots gitignored (warn-only)
     ];
 
     let checksToRun = allChecks;
@@ -2851,7 +2878,7 @@ export const doctorCommand: Command = {
       [checkNpmVersion, 'npm'], [checkClaudeCode, 'claude'],
       [checkAgentBrowserVersion, 'browser'], [checkGit, 'git'],
       [checkGitRepo, 'git-repo'], [checkConfigFile, 'config'],
-      [checkStaleSettingsNpx, 'stale-settings'], [helperCheck, 'helpers'],
+      [checkStaleSettingsNpx, 'stale-settings'], [() => checkProjectAutoApproveSettings(), 'auto-approve'], [helperCheck, 'helpers'],
       [checkDaemonStatus, 'daemon'], [checkMemoryDatabase, 'memory-presence'],
       [checkMemoryStructuralIntegrity, 'memory-structural'],
       [checkMemoryIntegrity, 'memory-integrity'],
@@ -2873,6 +2900,8 @@ export const doctorCommand: Command = {
       [checkProxyBinary, 'proxy-binary'], [checkProxyProcess, 'proxy-process'],
       [checkProxyBindAddress, 'proxy-bind'], [checkAuth, 'auth'],
       [checkTypesafeRouter, 'typesafe'], [checkMods, 'mods'],
+      [checkLearningLoop, 'learning-loop'], [checkHeadlessPlugins, 'headless-plugins'],
+      [checkCompactSnapshots, 'compact-snapshots'],
     ]);
     nativeAgentDbChecks.forEach((check, index) => {
       // The path distinguishes simultaneous authority files; normalize separators.

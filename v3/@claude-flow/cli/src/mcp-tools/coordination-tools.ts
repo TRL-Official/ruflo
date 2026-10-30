@@ -296,8 +296,8 @@ export const coordinationTools: MCPTool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['status', 'trigger', 'resolve'], description: 'Action to perform' },
-        force: { type: 'boolean', description: 'Force synchronization' },
+        action: { type: 'string', enum: ['status', 'trigger', 'resolve'], description: 'Action to perform. `trigger` is unavailable: nodes are local records with no sync backend, so it is refused (#4557)' },
+        force: { type: 'boolean', description: 'Unused: `trigger` is refused regardless (#4557)' },
         conflictResolution: { type: 'string', enum: ['latest', 'merge', 'manual'], description: 'Conflict resolution strategy' },
       },
     },
@@ -317,21 +317,16 @@ export const coordinationTools: MCPTool[] = [
       }
 
       if (action === 'trigger') {
-        store.sync.syncCount++;
-        store.sync.lastSync = new Date().toISOString();
-        store.sync.pendingChanges = 0;
-
-        // Simulate sync
-        await new Promise(resolve => setTimeout(resolve, 50));
-
-        saveCoordStore(store);
-
+        // #4557: this waited on a simulated 50ms "sync", bumped syncCount/lastSync
+        // and reported every node synchronized, but no state moves between
+        // nodes. Refuse without touching the stored sync record, as
+        // neural_compress quantize/prune do (#4195, #4423).
         return {
-          success: true,
-          action: 'synchronized',
+          success: false,
+          action: 'trigger',
+          error: 'Synchronization is unavailable: coordination nodes are local records with no sync backend, so nothing would be transferred.',
           syncCount: store.sync.syncCount,
-          syncedAt: store.sync.lastSync,
-          nodesSync: Object.keys(store.nodes).length,
+          lastSync: store.sync.lastSync,
         };
       }
 

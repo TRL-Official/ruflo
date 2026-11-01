@@ -242,6 +242,17 @@ export function shouldSuppressInitLog(msg: string): boolean {
  * Lazily initialize the ControllerRegistry singleton.
  * Returns null if @claude-flow/memory is not available.
  */
+/**
+ * Why the registry's AgentDB did not open, or null when it did (#4622).
+ * Read from the registry's own record (@claude-flow/memory >= 3.2.0); an
+ * older registry has none, and nothing changes for it.
+ */
+function agentdbInitFailure(registry: any, resolvedPath: string): string | null {
+  if (typeof registry?.getAgentDBInitError !== 'function') return null;
+  const reason = registry.getAgentDBInitError();
+  return typeof reason === 'string' && reason ? `AgentDB did not open ${resolvedPath}: ${reason}` : null;
+}
+
 async function getRegistry(dbPath?: string): Promise<any | null> {
   if (shouldDisableNativeBridge()) return null;
   if (testRegistryOverride) return testRegistryOverride;
@@ -503,6 +514,11 @@ async function getRegistry(dbPath?: string): Promise<any | null> {
 
         registryInstances.set(resolvedPath, registry);
         bridgeFailureReasons.delete(resolvedPath);
+        // #4622: the registry survives an AgentDB open failure (its other
+        // controllers still work), but every database operation then falls
+        // back to sql.js. Record why, so the fallback's own refusal names it.
+        const agentdbFailure = agentdbInitFailure(registry, resolvedPath);
+        if (agentdbFailure) bridgeFailureReasons.set(resolvedPath, agentdbFailure);
         return registry;
       } catch (err) {
         // initialize() may have opened a native handle before it failed.
@@ -2436,7 +2452,9 @@ export async function bridgeListControllers(
 export async function isBridgeAvailable(dbPath?: string): Promise<boolean> {
   if (!operationContext.getStore()?.active) return withBridgeOperation(() => isBridgeAvailable(dbPath));
   const registry = await getRegistry(dbPath);
-  return registry !== null;
+  if (registry === null) return false;
+  // #4622: a registry whose AgentDB failed to open serves no stored memory.
+  return agentdbInitFailure(registry, canonicalDbPath(dbPath)) === null;
 }
 
 /**
@@ -3261,6 +3279,110 @@ export async function bridgeDeleteCausalNode(options: {
   }
 }
 
+// ===== Episode recall (agentdb 3.2 hybrid retrieval, ADR-519) =====
+
+const EPISODE_TASK_MAX = 4_000;
+const EPISODE_TEXT_MAX = 2_000;
+const EPISODE_RECALL_MAX = 50;
+/** #3908: upper bound on the session-end NightlyLearner sweep. */
+const SESSION_END_CONSOLIDATE_TIMEOUT_MS = 10_000;
+
+export interface RecalledEpisode {
+  id?: number;
+  sessionId: string;
+  task: string;
+  critique?: string;
+  reward: number;
+  success: boolean;
+  similarity?: number;
+  tags?: string[];
+  ts?: number;
+}
+
+export interface EpisodeRecallOptions {
+  task: string;
+  k?: number;
+  /** Keyword + vector fusion. Default true (agentdb's own default). */
+  hybrid?: boolean;
+  /** Cross-encoder rerank. Default false: ~200 ms on CPU, 23 MB model on first use. */
+  rerank?: boolean;
+  onlySuccesses?: boolean;
+  onlyFailures?: boolean;
+  minReward?: number;
+  timeWindowDays?: number;
+}
+
+/** Null when the registry has no ReflexionMemory with retrieveRelevant. */
+async function recallEpisodesFrom(registry: any, options: EpisodeRecallOptions): Promise<RecalledEpisode[] | null> {
+  const reflexion = registry.get('reflexion');
+  if (!reflexion || typeof reflexion.retrieveRelevant !== 'function') return null;
+  const k = Math.min(Math.max(Math.trunc(options.k ?? 5), 1), EPISODE_RECALL_MAX);
+  const rows: any[] = await reflexion.retrieveRelevant({
+    task: options.task,
+    k,
+    hybrid: options.hybrid !== false,
+    rerank: options.rerank === true,
+    ...(options.onlySuccesses ? { onlySuccesses: true } : {}),
+    ...(options.onlyFailures ? { onlyFailures: true } : {}),
+    ...(typeof options.minReward === 'number' ? { minReward: options.minReward } : {}),
+    ...(typeof options.timeWindowDays === 'number' ? { timeWindowDays: options.timeWindowDays } : {}),
+  });
+  if (!Array.isArray(rows)) return [];
+  // Drop the embedding (1.5 KB of floats per row) and bound the text fields:
+  // this goes back over MCP.
+  return rows.slice(0, k).map(r => ({
+    ...(typeof r.id === 'number' ? { id: r.id } : {}),
+    sessionId: String(r.sessionId ?? ''),
+    task: String(r.task ?? '').slice(0, EPISODE_TEXT_MAX),
+    ...(r.critique ? { critique: String(r.critique).slice(0, EPISODE_TEXT_MAX) } : {}),
+    reward: Number(r.reward ?? 0),
+    success: !!r.success,
+    ...(typeof r.similarity === 'number' ? { similarity: Math.round(r.similarity * 1e4) / 1e4 } : {}),
+    ...(Array.isArray(r.tags) ? { tags: r.tags.slice(0, 20) } : {}),
+    ...(typeof r.ts === 'number' ? { ts: r.ts } : {}),
+  }));
+}
+
+/**
+ * Recall past episodes relevant to a task. Episodes come from session ends
+ * and from `memory distill`. Ranking is agentdb's keyword + vector fusion,
+ * optionally reranked by a local cross-encoder.
+ */
+export async function bridgeRecallEpisodes(options: EpisodeRecallOptions & { dbPath?: string }): Promise<{
+  success: boolean;
+  controller: string;
+  episodes: RecalledEpisode[];
+  hybrid: boolean;
+  rerank: boolean;
+} | null> {
+  if (!operationContext.getStore()?.active) return withBridgeOperation(() => bridgeRecallEpisodes(options));
+  const registry = await getRegistry(options.dbPath);
+  if (!registry) return null;
+  const episodes = await recallEpisodesFrom(registry, options);
+  if (!episodes) return null;
+  return {
+    success: true,
+    controller: 'reflexion',
+    episodes,
+    hybrid: options.hybrid !== false,
+    rerank: options.rerank === true,
+  };
+}
+
+/**
+ * Run `fn` against the ReflexionMemory controller inside one bridge operation, so a shutdown waits
+ * for it (ADR-520). Null when the bridge or the controller is unavailable.
+ */
+export async function withReflexionController<T>(
+  dbPath: string | undefined,
+  fn: (reflexion: any) => Promise<T>,
+): Promise<T | null> {
+  if (!operationContext.getStore()?.active) return withBridgeOperation(() => withReflexionController(dbPath, fn));
+  const registry = await getRegistry(dbPath);
+  const reflexion = registry?.get?.('reflexion');
+  return reflexion ? fn(reflexion) : null;
+}
+
 // ===== Phase 5: ReflexionMemory session lifecycle =====
 
 /**
@@ -3271,11 +3393,17 @@ export async function bridgeSessionStart(options: {
   sessionId: string;
   context?: string;
   dbPath?: string;
+  /** Recall past session episodes relevant to `context`. Default false. */
+  recall?: boolean;
+  k?: number;
+  hybrid?: boolean;
+  rerank?: boolean;
 }): Promise<{
   success: boolean;
   controller: string;
   restoredPatterns: number;
   sessionId: string;
+  episodes?: RecalledEpisode[];
 } | null> {
   if (!operationContext.getStore()?.active) return withBridgeOperation(() => bridgeSessionStart(options));
   const registry = await getRegistry(options.dbPath);
@@ -3285,21 +3413,35 @@ export async function bridgeSessionStart(options: {
     let restoredPatterns = 0;
     let controller = 'none';
 
-    // Try ReflexionMemory for episodic session replay
-    const reflexion = registry.get('reflexion');
-    if (reflexion && typeof reflexion.startEpisode === 'function') {
-      await reflexion.startEpisode(options.sessionId, { context: options.context });
-      controller = 'reflexion';
+    // Episodic replay: past session episodes relevant to this session's
+    // context, ranked by agentdb's keyword + vector search (agentdb ADR-016).
+    // Opt-in, because a recall costs an embedding call and a generic context
+    // ("new session") matches nothing in particular.
+    let episodes: RecalledEpisode[] | undefined;
+    if (options.recall && options.context) {
+      const recalled = await recallEpisodesFrom(registry, {
+        task: options.context, k: options.k, hybrid: options.hybrid, rerank: options.rerank,
+      });
+      if (recalled) {
+        episodes = recalled;
+        controller = 'reflexion';
+      }
     }
 
-    // Load recent patterns from past sessions
-    const searchResult = await bridgeSearchEntries({
-      query: options.context || 'session patterns',
-      namespace: 'session',
-      limit: 10,
-      threshold: 0.2,
-      dbPath: options.dbPath,
-    });
+    // Load recent patterns from past sessions. A failure here must not
+    // discard episodes already recalled above.
+    let searchResult: Awaited<ReturnType<typeof bridgeSearchEntries>> = null;
+    try {
+      searchResult = await bridgeSearchEntries({
+        query: options.context || 'session patterns',
+        namespace: 'session',
+        limit: 10,
+        threshold: 0.2,
+        dbPath: options.dbPath,
+      });
+    } catch (err) {
+      if (!episodes) throw err;
+    }
 
     if (searchResult?.results) {
       restoredPatterns = searchResult.results.length;
@@ -3310,6 +3452,7 @@ export async function bridgeSessionStart(options: {
       controller: controller === 'none' ? 'bridge-search' : controller,
       restoredPatterns,
       sessionId: options.sessionId,
+      ...(episodes ? { episodes } : {}),
     };
   } catch {
     return null;
@@ -3329,6 +3472,7 @@ export async function bridgeSessionEnd(options: {
   success: boolean;
   controller: string;
   persisted: boolean;
+  episodeId?: number;
 } | null> {
   if (!operationContext.getStore()?.active) return withBridgeOperation(() => bridgeSessionEnd(options));
   const registry = await getRegistry(options.dbPath);
@@ -3338,47 +3482,95 @@ export async function bridgeSessionEnd(options: {
     let controller = 'none';
     let persisted = false;
 
-    // End episode in ReflexionMemory
+    // Store the session summary as a ReflexionMemory episode so a later
+    // session can recall it. Only a real summary is worth recalling. The
+    // outcome is unverified, so it is stored neutral (reward 0, not a success)
+    // and can never count as evidence that an approach worked (ADR-171).
+    let episodeId: number | undefined;
     const reflexion = registry.get('reflexion');
-    if (reflexion && typeof reflexion.endEpisode === 'function') {
-      await reflexion.endEpisode(options.sessionId, {
-        summary: options.summary,
-        tasksCompleted: options.tasksCompleted,
-        patternsLearned: options.patternsLearned,
+    if (options.summary && reflexion && typeof reflexion.storeEpisode === 'function') {
+      try {
+        const id = await reflexion.storeEpisode({
+          sessionId: options.sessionId,
+          task: options.summary.slice(0, EPISODE_TASK_MAX),
+          reward: 0,
+          success: false,
+          tags: ['session-end'],
+          metadata: {
+            source: 'session-end',
+            provenance: 'session-summary',
+            tasksCompleted: options.tasksCompleted ?? 0,
+            patternsLearned: options.patternsLearned ?? 0,
+          },
+        });
+        if (typeof id === 'number' && Number.isFinite(id)) {
+          episodeId = id;
+          controller = 'reflexion';
+          persisted = true;
+        }
+      } catch { /* non-fatal: the memory entry below still records the session */ }
+    }
+
+    // Persist session summary as memory entry. A failure here must not hide
+    // an episode that was already stored above.
+    let entryStored = false;
+    try {
+      await bridgeStoreEntry({
+        key: `session-${options.sessionId}`,
+        value: JSON.stringify({
+          sessionId: options.sessionId,
+          summary: options.summary || 'Session ended',
+          tasksCompleted: options.tasksCompleted ?? 0,
+          patternsLearned: options.patternsLearned ?? 0,
+          endedAt: new Date().toISOString(),
+        }),
+        namespace: 'session',
+        tags: ['session-end'],
+        upsert: true,
+        dbPath: options.dbPath,
       });
-      controller = 'reflexion';
+      entryStored = true;
+    } catch (err) {
+      if (episodeId === undefined) throw err;
+    }
+
+    if (entryStored) {
+      controller = controller === 'none' ? 'bridge-store' : controller + '+bridge-store';
       persisted = true;
     }
 
-    // Persist session summary as memory entry
-    await bridgeStoreEntry({
-      key: `session-${options.sessionId}`,
-      value: JSON.stringify({
-        sessionId: options.sessionId,
-        summary: options.summary || 'Session ended',
-        tasksCompleted: options.tasksCompleted ?? 0,
-        patternsLearned: options.patternsLearned ?? 0,
-        endedAt: new Date().toISOString(),
-      }),
-      namespace: 'session',
-      tags: ['session-end'],
-      upsert: true,
-      dbPath: options.dbPath,
-    });
-
-    if (controller === 'none') controller = 'bridge-store';
-    persisted = true;
-
-    // Phase 3: Trigger NightlyLearner consolidation if available
+    // Phase 3: Trigger NightlyLearner consolidation if available.
+    // #3908: neither the MemoryConsolidator wrapper nor AgentDB's NightlyLearner
+    // has `consolidate` — they expose `run`/`runAll` — so probing only for
+    // `consolidate` meant session-end never consolidated. Bounded so a slow
+    // sweep cannot hold session-end open.
     const nightlyLearner = registry.get('nightlyLearner');
-    if (nightlyLearner && typeof nightlyLearner.consolidate === 'function') {
+    const consolidate = nightlyLearner && (
+      typeof nightlyLearner.consolidate === 'function'
+        ? () => nightlyLearner.consolidate({ sessionId: options.sessionId })
+        : typeof nightlyLearner.run === 'function'
+          ? () => nightlyLearner.run()
+          : typeof nightlyLearner.runAll === 'function'
+            ? () => nightlyLearner.runAll()
+            : null
+    );
+    if (consolidate) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await nightlyLearner.consolidate({ sessionId: options.sessionId });
+        await Promise.race([
+          Promise.resolve().then(consolidate),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('nightlyLearner timeout')), SESSION_END_CONSOLIDATE_TIMEOUT_MS);
+            timer.unref?.();
+          }),
+        ]);
         controller += '+nightlyLearner';
-      } catch { /* non-fatal */ }
+      } catch { /* non-fatal */ } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
 
-    return { success: true, controller, persisted };
+    return { success: true, controller, persisted, ...(episodeId !== undefined ? { episodeId } : {}) };
   } catch {
     return null;
   }

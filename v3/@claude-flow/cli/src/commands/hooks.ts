@@ -10,6 +10,7 @@ import { output } from '../output.js';
 import { select, confirm, input } from '../prompt.js';
 import { callMCPTool, MCPClientError } from '../mcp-client.js';
 import { storeCommand } from './transfer-store.js';
+import { contextPlanCommand } from './context-plan.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -4454,7 +4455,9 @@ const statuslineCommand: Command = {
       const securityCompact = security.findings > 0
         ? `Findings:${security.findings}`
         : `Security:${security.status}`;
-      const line = `DDD:${progress.domainsCompleted}/${progress.totalDomains} ${securityCompact} Swarm:${swarm.activeAgents}/${swarm.maxAgents} Ctx:${system.contextPct}% Int:${system.intelligencePct}%`;
+      // #1047: this tier is derived from memory pattern-count thresholds, not
+      // Domain-Driven-Design domain completion — label it for what it is.
+      const line = `Learning:${progress.domainsCompleted}/${progress.totalDomains} ${securityCompact} Swarm:${swarm.activeAgents}/${swarm.maxAgents} Ctx:${system.contextPct}% Int:${system.intelligencePct}%`;
       output.writeln(line);
       return { success: true, data: statusData };
     }
@@ -4628,7 +4631,10 @@ const statuslineCommand: Command = {
       perfIndicator = `${c.brightYellow}📚 ${patternsK} patterns${c.reset}`;
     }
 
-    const line1 = `${c.brightCyan}🏗️  DDD Domains${c.reset}    ${progressBar(progress.domainsCompleted, progress.totalDomains)}  ` +
+    // #1047: renamed from "DDD Domains" — this tier comes from memory
+    // pattern-count thresholds (see getV3Progress above), not actual
+    // Domain-Driven-Design domain completion. "Learning Tier" says what it is.
+    const line1 = `${c.brightCyan}🏗️  Learning Tier${c.reset}    ${progressBar(progress.domainsCompleted, progress.totalDomains)}  ` +
       `${domainsColor}${progress.domainsCompleted}${c.reset}/${c.brightWhite}${progress.totalDomains}${c.reset}    ` +
       perfIndicator;
 
@@ -4645,10 +4651,19 @@ const statuslineCommand: Command = {
       `${c.brightCyan}💾 ${system.memoryMB}MB${c.reset}    ` +
       `${c.brightPurple}🧠 ${String(system.intelligencePct).padStart(3)}%${c.reset}`;
 
-    const dddColor = progress.dddProgress >= 50 ? c.brightGreen : progress.dddProgress > 0 ? c.yellow : c.red;
+    // #1047: "DDD ●XX%" previously showed a fake architecture-progress
+    // percentage that was really just the memory pattern count run through
+    // getV3Progress's bucket thresholds — it has no connection to actual DDD
+    // domain completion. Show the real number it was derived from instead,
+    // per the issue's own recommendation ("Memory entries: 290" instead of
+    // "DDD ●80%").
+    const memoryColor = progress.patternsLearned >= 50 ? c.brightGreen : progress.patternsLearned > 0 ? c.yellow : c.red;
+    const patternsDisplay = progress.patternsLearned >= 1000
+      ? `${(progress.patternsLearned / 1000).toFixed(1)}k`
+      : String(progress.patternsLearned);
     const line3 = `${c.brightPurple}🔧 Architecture${c.reset}    ` +
       `${c.cyan}ADRs${c.reset} ${c.dim}●0/0${c.reset}  ${c.dim}│${c.reset}  ` +
-      `${c.cyan}DDD${c.reset} ${dddColor}●${String(progress.dddProgress).padStart(3)}%${c.reset}  ${c.dim}│${c.reset}  ` +
+      `${c.cyan}Memory${c.reset} ${memoryColor}●${patternsDisplay}${c.reset}  ${c.dim}│${c.reset}  ` +
       `${c.cyan}Security${c.reset} ${securityColor}●${security.status}${c.reset}`;
 
     const vectorColor = agentdbStats.vectorCount > 0 ? c.brightGreen : c.dim;
@@ -5495,6 +5510,7 @@ const verifiedIngestCommand: Command = {
   options: [
     { name: 'dry-run', description: 'Count only: train nothing and write nothing', type: 'boolean', default: false },
     { name: 'force', description: 'Re-read the file even if unchanged since the last ingest', type: 'boolean', default: false },
+    { name: 'quiet', description: 'Suppress output (used when spawned detached from a hook)', type: 'boolean', default: false },
   ],
   examples: [
     { command: 'ruflo hooks verified-ingest', description: 'Ingest new verified outcomes and refresh learned-lessons.json' },
@@ -5509,12 +5525,13 @@ const verifiedIngestCommand: Command = {
         reverify?: { enabled: boolean; ran: number; passed: number; downgraded: number; deferred: number };
         totals: { verifiedSuccess: number; verifiedFailure: number; unknown: number; tainted?: number };
       }>('hooks_intelligence_verified-ingest', { dryRun: ctx.flags['dry-run'] === true || ctx.flags.dryRun === true, force: ctx.flags.force === true });
+      if (ctx.flags.quiet) return { success: true, data: result };
       if (ctx.flags.format === 'json') {
         output.printJson(result);
         return { success: true, data: result };
       }
       if (result.skipped === 'no-file') {
-        output.printInfo('No recorded turns yet (.claude-flow/data/verified-trajectories.jsonl). Turn on the ruflo-mods learningLoop option.');
+        output.printInfo('No recorded turns yet (.claude-flow/data/verified-trajectories.jsonl). The classic hooks and the ruflo-mods learningLoop option both record them.');
         return { success: true, data: result };
       }
       if (!result.sonaAvailable) output.printWarning('SONA unavailable: verified outcomes wait for the next ingest');
@@ -5565,6 +5582,7 @@ export const hooksCommand: Command = {
     coverageGapsCommand,
     // Token optimization
     tokenOptimizeCommand,
+    contextPlanCommand,
     // Model routing (tiny-dancer integration)
     modelRouteCommand,
     modelOutcomeCommand,

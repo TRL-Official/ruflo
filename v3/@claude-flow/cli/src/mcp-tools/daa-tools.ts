@@ -253,10 +253,15 @@ export const daaTools: MCPTool[] = [
         id,
         name: input.name as string,
         status: 'pending',
-        steps: ((input.steps as unknown[]) || []).map((s, i) => ({
-          name: typeof s === 'string' ? s : `Step ${i + 1}`,
-          status: 'pending',
-        })),
+        // The schema declares object steps; keep their `name` instead of
+        // renaming every one to "Step N".
+        steps: ((input.steps as unknown[]) || []).map((s, i) => {
+          const given = typeof s === 'string' ? s : (s as { name?: unknown } | null)?.name;
+          return {
+            name: typeof given === 'string' && given.trim() ? given : `Step ${i + 1}`,
+            status: 'pending',
+          };
+        }),
         strategy: (input.strategy as string) || 'adaptive',
         createdAt: new Date().toISOString(),
       };
@@ -351,7 +356,9 @@ export const daaTools: MCPTool[] = [
       const targetIds = input.targetAgentIds as string[];
       const domain = (input.knowledgeDomain as string) || 'general';
 
-      const knowledgeId = `knowledge-${Date.now()}`;
+      // A random suffix keeps two shares in the same millisecond from
+      // overwriting each other in store.knowledge (and in AgentDB).
+      const knowledgeId = `knowledge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const knowledgeEntry = {
         domain,
         content: input.knowledgeContent || {},

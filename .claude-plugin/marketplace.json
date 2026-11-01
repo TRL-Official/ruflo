@@ -63,6 +63,28 @@
       "description": "Agentic QE (external: maintained in proffesor-for-testing/agentic-qe, pinned to v3.15.17): a quality-engineering fleet with 11 QE agents, 9 skills, 9 commands, the agentic-qe MCP server pinned to the plugin version, and the aqe-mod guard that refuses destructive operations on AQE learning data"
     },
     {
+      "name": "agentdb",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/ruvnet/agentdb.git",
+        "path": "plugins/agentdb",
+        "ref": "plugin-v3.3.0",
+        "sha": "d3df60d4f94f29199373fd45e837085c0d92a2b2"
+      },
+      "description": "AgentDB (external: maintained in ruvnet/agentdb, pinned to plugin-v3.3.0): agentdb's own standalone MCP server pinned to agentdb@3.3.0 (vector memory with get/list/update/delete for records, patterns and skills, hybrid keyword + vector episode search and an opt-in local cross-encoder, reflexion, skills, outcome feedback, capabilities report), a memory-specialist agent, 3 skills, /agentdb-status, and the agentdb mod guard that keeps secrets out of memory and refuses delete/reset unless allowed. Complements ruflo-agentdb, which reaches AgentDB through ruflo's server"
+    },
+    {
+      "name": "agentic-flow",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/ruvnet/agentic-flow.git",
+        "path": "plugins/agentic-flow",
+        "ref": "plugin-v3.1.0",
+        "sha": "2c86073bf55a105282bbdd4476fc18f5b7e6f97d"
+      },
+      "description": "agentic-flow (external: maintained in ruvnet/agentic-flow, pinned to plugin-v3.1.0): the agentic-flow MCP server pinned to agentic-flow@3.1.0 (ReasoningBank learning, multi-provider routing, autopilot learning; readonly profile by default, no tool pre-approved), 2 agents, 3 skills, /agentic-flow-status, and a mod guard on agentic_flow_agent with /agentic-flow-guard"
+    },
+    {
       "name": "ruflo-docs",
       "source": "./plugins/ruflo-docs",
       "description": "Documentation generation, drift detection, and API docs automation"

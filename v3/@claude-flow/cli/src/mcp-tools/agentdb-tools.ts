@@ -967,12 +967,12 @@ export const agentdbBatch: MCPTool = {
 
 export const agentdbContextSynthesize: MCPTool = {
   name: 'agentdb_context-synthesize',
-  description: 'Synthesize context from stored memories for a given query Use when generic memory_* tools are wrong because you need AgentDB-specific controllers (HNSW vector search, hierarchical tiers, causal-graph links, pattern store/recall, RaBitQ quantization). For simple key-value persistence, memory_store/memory_retrieve are simpler. For unrelated file work, native Read/Write are fine.',
+  description: 'Summarize validated task episodes (task, reward, success, critique) that match a query: observed success rate, reward and critique-derived patterns. Ordinary documents, research notes and graph entities are not episodes, so for them it answers no-memories or no-eligible-episodes; read those with memory_search or memory_retrieve instead. Use when generic memory_* tools are wrong because you need AgentDB-specific controllers (HNSW vector search, hierarchical tiers, causal-graph links, pattern store/recall, RaBitQ quantization). For simple key-value persistence, memory_store/memory_retrieve are simpler. For unrelated file work, native Read/Write are fine.',
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Query to synthesize context for' },
-      maxEntries: { type: 'number', description: 'Maximum entries to include (default: 10)' },
+      query: { type: 'string', description: 'Task to find matching validated episodes for' },
+      maxEntries: { type: 'number', description: 'Maximum episodes to include (default: 10)' },
     },
     required: ['query'],
   },
@@ -1506,6 +1506,8 @@ export const agentdbGraphPathfinder: MCPTool = {
 
       const edges = rawEdges as unknown[][];
       let paths: Array<{ nodeId: string; score: number; depth: number }> = [];
+      let mincutInfo: Record<string, unknown> | undefined;
+      let approximation: string | undefined;
 
       // Check millisecond budget before heavy computation
       if (Date.now() - t0 > budget.maxMillis) {
@@ -1562,10 +1564,38 @@ export const agentdbGraphPathfinder: MCPTool = {
           paths = witnessChain.slice(0, topK);
           break;
         }
+        case 'dynamic-mincut': {
+          // Exact minimum cut of the seed's depth-hop neighbourhood: the
+          // weakest boundary around the seed, and the nodes on its side of it.
+          // Wasm solver via ruvector (@ruvector/mincut-wasm), JS Stoer-Wagner
+          // fallback for small neighbourhoods.
+          const edgeTuples = edges.map(r => [String(r[0]), String(r[1]), Number(r[2]) || 1.0] as [string, string, number]);
+          const { seedLocalMinCut } = await import('../ruvector/mincut-bridge.js');
+          const { fallbackMinCut } = await import('../ruvector/graph-analyzer.js');
+          const cut = await seedLocalMinCut(seedNodeId, edgeTuples, depth, budget.maxNodesVisited, fallbackMinCut);
+          if (!cut) {
+            mincutInfo = { backend: 'none', message: 'seed neighbourhood too large for the JS fallback and the wasm solver is unavailable (install ruvector)' };
+            break;
+          }
+          paths = cut.seedSide
+            .map(r => ({ nodeId: r.nodeId, score: 1 / (1 + r.depth), depth: r.depth }))
+            .filter(r => r.score >= threshold)
+            .slice(0, topK);
+          mincutInfo = {
+            backend: cut.backend,
+            cutValue: cut.cutValue,
+            seedSideSize: cut.seedSide.length + 1,
+            otherSideSize: cut.otherSide.length,
+            subgraphNodes: cut.subgraphNodes,
+            cutEdges: cut.cutEdges.slice(0, 50),
+          };
+          break;
+        }
         case 'connected-component-churn':
-        case 'dynamic-mincut':
         case 'spectral-sparsify': {
-          // Simplified implementations: return k-hop neighbors with basic score
+          // Not implemented natively yet: approximated by k-hop neighbours with
+          // a rank-decay score. The response says so via `implementation`.
+          approximation = 'k-hop';
           const edgeTuples = edges.map(r => [r[0], r[1], Number(r[2]) || 1.0] as [string, string, number]);
           const khopResult = await agentdbGraphQuery.handler({
             nodeId: seedNodeId, mode: 'k-hop', depth, complexityBudget: budget,
@@ -1588,6 +1618,8 @@ export const agentdbGraphPathfinder: MCPTool = {
         count: paths.length,
         elapsedMs,
         budgetUsed: { millis: elapsedMs, nodes: rawEdges.length },
+        ...(mincutInfo && { mincut: mincutInfo }),
+        ...(approximation && { implementation: `${approximation} approximation` }),
         ...(depthWarning && { warning: depthWarning }),
       };
     } catch (error) {

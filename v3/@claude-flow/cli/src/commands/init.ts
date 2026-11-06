@@ -917,17 +917,24 @@ const initClaudeAction = async (ctx: CommandContext): Promise<CommandResult> => 
       output.writeln();
       output.printInfo('Starting services...');
 
-      const { execSync } = await import('child_process');
+      const { execFileSync } = await import('child_process');
+
+      // #4770: drop stderr via stdio, not a shell redirect (breaks on cmd.exe).
+      // shell on win32 so npx.cmd resolves (#2770); args are fixed literals.
+      const runCli = (args: string[]): void => {
+        execFileSync('npx', ['@claude-flow/cli@latest', ...args], {
+          stdio: ['ignore', 'pipe', 'ignore'],
+          cwd: ctx.cwd,
+          timeout: 30000,
+          shell: process.platform === 'win32',
+        });
+      };
 
       // Initialize memory database
       if (startAll) {
         try {
           output.writeln(output.dim('  Initializing memory database...'));
-          execSync('npx @claude-flow/cli@latest memory init 2>/dev/null', {
-            stdio: 'pipe',
-            cwd: ctx.cwd,
-            timeout: 30000
-          });
+          runCli(['memory', 'init']);
           output.writeln(output.success('  ✓ Memory initialized'));
         } catch {
           output.writeln(output.dim('  Memory database already exists'));
@@ -956,11 +963,7 @@ const initClaudeAction = async (ctx: CommandContext): Promise<CommandResult> => 
       if (startDaemon) {
         try {
           output.writeln(output.dim('  Starting daemon...'));
-          execSync('npx @claude-flow/cli@latest daemon start 2>/dev/null', {
-            stdio: 'pipe',
-            cwd: ctx.cwd,
-            timeout: 30000
-          });
+          runCli(['daemon', 'start']);
           output.writeln(output.success('  ✓ Daemon started'));
         } catch {
           // Daemon dedup hit (already running) OR spawn timed out.
@@ -974,11 +977,7 @@ const initClaudeAction = async (ctx: CommandContext): Promise<CommandResult> => 
       if (startAll) {
         try {
           output.writeln(output.dim('  Initializing swarm...'));
-          execSync('npx @claude-flow/cli@latest swarm init --topology hierarchical 2>/dev/null', {
-            stdio: 'pipe',
-            cwd: ctx.cwd,
-            timeout: 30000
-          });
+          runCli(['swarm', 'init', '--topology', 'hierarchical']);
           output.writeln(output.success('  ✓ Swarm initialized'));
         } catch {
           output.writeln(output.dim('  Swarm initialization skipped'));
@@ -1209,6 +1208,7 @@ const wizardCommand: Command = {
               { value: 'github', label: 'GitHub', hint: 'GitHub integration skills', selected: true },
               { value: 'flowNexus', label: 'Flow Nexus', hint: 'Cloud platform skills', selected: false },
               { value: 'v3', label: 'V3', hint: 'V3 implementation skills', selected: true },
+              { value: 'legacy', label: 'Legacy', hint: 'Skills that document commands v3 does not ship', selected: false },
             ],
           });
 
@@ -1217,6 +1217,7 @@ const wizardCommand: Command = {
           options.skills.github = skillSets.includes('github');
           options.skills.flowNexus = skillSets.includes('flowNexus');
           options.skills.v3 = skillSets.includes('v3');
+          options.skills.legacy = skillSets.includes('legacy');
         }
 
         // Hooks selection
@@ -1497,6 +1498,8 @@ const skillsCommand: Command = {
     { name: 'agentdb', description: 'Install AgentDB skills', type: 'boolean', default: false },
     { name: 'github', description: 'Install GitHub skills', type: 'boolean', default: false },
     { name: 'v3', description: 'Install V3 skills', type: 'boolean', default: false },
+    { name: 'legacy', description: 'Install skills that document commands v3 does not ship (stream-chain, sparc)', type: 'boolean', default: false },
+    { name: 'ecosystem', description: 'Install ecosystem skills (vector quantization, graph min-cut, sublinear solving, injection defense, fast edits, LoRA learning)', type: 'boolean', default: true },
   ],
   action: async (ctx: CommandContext): Promise<CommandResult> => {
     const options: InitOptions = {
@@ -1523,6 +1526,8 @@ const skillsCommand: Command = {
         browser: false,
         v3: ctx.flags.v3 as boolean,
         dualMode: false,
+        legacy: ctx.flags.legacy as boolean,
+        ecosystem: ctx.flags.ecosystem as boolean,
       },
     };
 

@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { join } from 'node:path';
 import { type MCPTool, getProjectCwd } from './types.js';
+import { containedWritePath } from './path-containment.js';
+import { MAX_IMPORT_BYTES, readImportFile } from './import-limits.js';
 import {
   mkdirRestricted,
   readFileMaybeEncrypted,
@@ -778,7 +780,9 @@ export const sessionTools: MCPTool[] = [
       let path: string | null = null;
       const outputPath = input.outputPath ? String(input.outputPath) : null;
       if (outputPath) {
-        try { writeFileSync(outputPath, JSON.stringify(session, null, 2), 'utf-8'); path = outputPath; }
+        const target = containedWritePath(outputPath);
+        if (!target) return { sessionId, error: 'outputPath must be a file inside the project directory (no symlinks)' };
+        try { writeFileSync(target, JSON.stringify(session, null, 2), 'utf-8'); path = target; }
         catch (e) { return { sessionId, error: `Could not write ${outputPath}: ${(e as Error).message}` }; }
       }
       return { sessionId, name: session.name, data: session, path, exportedAt: new Date().toISOString() };
@@ -793,7 +797,7 @@ export const sessionTools: MCPTool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        inputPath: { type: 'string', description: 'Path to the session JSON file to import (or pass data)' },
+        inputPath: { type: 'string', description: 'Path to the session JSON file to import (or pass data); file and gzip output are each limited to 16 MiB' },
         data: { type: 'object', description: 'The session record itself, as written by session_export (or pass inputPath)' },
         name: { type: 'string', description: 'Override the imported session name' },
         activate: { type: 'boolean', description: 'Restore the imported session into the active stores' },
@@ -808,8 +812,9 @@ export const sessionTools: MCPTool[] = [
         if (!inputPath) return { error: 'Provide inputPath (a session JSON file) or data (a session record)' };
         if (!existsSync(inputPath)) return { error: `File not found: ${inputPath}` };
         try {
-          const bytes = readFileSync(inputPath);
-          const content = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes;
+          const bytes = readImportFile(inputPath);
+          const content = bytes[0] === 0x1f && bytes[1] === 0x8b
+            ? gunzipSync(bytes, { maxOutputLength: MAX_IMPORT_BYTES }) : bytes;
           parsed = JSON.parse(content.toString('utf-8'));
         }
         catch (e) { return { error: `Invalid session JSON: ${(e as Error).message}` }; }

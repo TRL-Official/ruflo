@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { type MCPTool, getProjectCwd } from './types.js';
 import { validateIdentifier, validatePath, validateText } from './validate-input.js';
 import { executeAgentTask } from './agent-execute-core.js';
+import { readPreservedJsonStore } from './record-store.js';
 
 // Storage paths
 const STORAGE_DIR = '.claude-flow';
@@ -94,17 +95,43 @@ function ensureWorkflowDir(): void {
   }
 }
 
-function loadWorkflowStore(): WorkflowStore {
-  try {
-    const path = getWorkflowPath();
-    if (existsSync(path)) {
-      const data = readFileSync(path, 'utf-8');
-      return JSON.parse(data);
-    }
-  } catch {
-    // Return default store on error
+/**
+ * SECURITY: record maps are keyed by ids taken from MCP tool input, and
+ * validateIdentifier accepts names like `__proto__` and `constructor`. On a
+ * plain object those resolve to Object.prototype or a built-in, which a handler
+ * would then write into. Null-prototype maps only ever return own records.
+ */
+function withRecordMaps<S extends object>(store: S, keys: readonly string[]): S {
+  const maps = store as Record<string, unknown>;
+  for (const key of keys) {
+    const map = maps[key];
+    if (map && typeof map === 'object' && !Array.isArray(map)) Object.setPrototypeOf(map, null);
+    else maps[key] = Object.create(null);
   }
-  return { workflows: {}, templates: {}, version: '3.0.0' };
+  return store;
+}
+
+const WORKFLOW_MAPS = ['workflows', 'templates'] as const;
+
+function isRecordMap(value: unknown): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function loadWorkflowStore(): WorkflowStore {
+  // #4737: a parse error used to return an empty store, and the next save
+  // overwrote the file. Only a missing file is empty; corrupt bytes are
+  // copied aside and the error is reported.
+  const path = getWorkflowPath();
+  const data = readPreservedJsonStore(
+    path,
+    'workflow',
+    () => ({ workflows: {}, templates: {}, version: '3.0.0' }) as WorkflowStore,
+    (store) => WORKFLOW_MAPS.every((key) => {
+      const map = (store as unknown as Record<string, unknown>)[key];
+      return map === undefined || isRecordMap(map);
+    }),
+  );
+  return withRecordMaps(data, WORKFLOW_MAPS);
 }
 
 function saveWorkflowStore(store: WorkflowStore): void {

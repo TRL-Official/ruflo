@@ -2278,6 +2278,8 @@ interface EmbeddingModel {
   model: unknown;
   tokenizer: unknown;
   dimensions: number;
+  /** Which model produced the vectors (ADR-527 checks it against the agent centroids). */
+  modelId?: string;
   /**
    * ADR-454: distinguishes a hash-fallback state that's legitimately
    * permanent (no transformers package importable at all) from one caused
@@ -2444,7 +2446,8 @@ async function loadLocalEmbeddingChain(verbose = false, startTime = Date.now()):
           loaded: true,
           model: embedder,
           tokenizer: null,
-          dimensions: embCfg.dimension
+          dimensions: embCfg.dimension,
+          modelId: embCfg.model,
         };
 
         return {
@@ -2484,7 +2487,8 @@ async function loadLocalEmbeddingChain(verbose = false, startTime = Date.now()):
         loaded: true,
         model: (text: string) => reasoningBank.computeEmbedding(text),
         tokenizer: null,
-        dimensions: 384
+        dimensions: 384,
+        modelId: 'agentic-flow/all-MiniLM-L6-v2',
       };
 
       return {
@@ -2518,7 +2522,8 @@ async function loadLocalEmbeddingChain(verbose = false, startTime = Date.now()):
               loaded: true,
               model: (text: string) => onnxEmb.embed(text),
               tokenizer: null,
-              dimensions: probe.length || 384
+              dimensions: probe.length || 384,
+              modelId: 'ruvector/all-MiniLM-L6-v2',
             };
             return {
               success: true,
@@ -2633,6 +2638,8 @@ export async function generateLocalEmbedding(
   embedding: number[];
   dimensions: number;
   model: string;
+  /** Model id behind an onnx vector, when known (ADR-527). */
+  modelId?: string;
   backend: 'onnx' | 'mock';
 }> {
   // Default true keeps the historical unit-norm embedding math.
@@ -2683,6 +2690,7 @@ export async function generateLocalEmbedding(
           embedding,
           dimensions: embedding.length,
           model: 'onnx',
+          ...(state.modelId ? { modelId: state.modelId } : {}),
           backend: 'onnx'
         };
       }
@@ -3857,10 +3865,18 @@ export async function getEntry(options: {
       return { success: false, found: false, error: 'Database not found' };
     }
 
-    // #2735 — see storeEntry's identical gate for the corruption mechanism
-    // this closes. Applies here too because the fallback's access_count
-    // bump is itself a whole-image write, not a lightweight read, even
-    // though this function's contract reads as a "get".
+    // #4734: a get is a pure READ. It no longer bumps access_count nor
+    // export/rewrites the whole sql.js image — doing so made every read a
+    // full-image write that serialised on the exclusive memory.db lock and lost
+    // writes under concurrent readers. It is now lock-free like listEntries /
+    // searchEntries: writeFileAtomic's rename() keeps every reader on a complete
+    // image, and ensureSchemaColumns self-locks only if it must ALTER/backfill.
+    // access_count stays display-only (response returns stored+1); it is never
+    // consulted for eviction/decay, so skipping the persistent bump is safe.
+    //
+    // #2735 — still refuse while a native WAL connection holds an uncommitted
+    // transaction: reading a snapshot a live writer is mid-commit would expose
+    // stale data. releaseOwnNativeHandle drops our own idle handle first.
     await releaseOwnNativeHandle(dbPath);
     if (await hasNativeWalSidecars(dbPath)) {
       return {
@@ -3870,85 +3886,71 @@ export async function getEntry(options: {
       };
     }
 
-    // #2878: this is a mutator, not a reader — the access_count bump below
-    // rewrites the whole image, so an unlocked "get" concurrent with a store
-    // flushes a predecessor image over it and silently drops the new row.
-    // There is no cheaper granularity available: the read and the bump share
-    // one image, so the lock has to span both.
-    return await withMemoryDbLock(dbPath, async () => {
-      // Ensure schema has all required columns (migration for older DBs)
-      await ensureSchemaColumns(dbPath);
+    // Ensure schema has all required columns (migration for older DBs).
+    // This self-locks internally only when it actually has to ALTER/backfill;
+    // on a healthy DB it is a plain read. See ensureSchemaColumns (#2878).
+    await ensureSchemaColumns(dbPath);
 
-      const initSqlJs = (await import('sql.js')).default;
-      const SQL = await initSqlJs();
+    const initSqlJs = (await import('sql.js')).default;
+    const SQL = await initSqlJs();
 
-      const fileBuffer = readFileMaybeEncrypted(dbPath, null);
-      const db = new SQL.Database(fileBuffer);
+    const fileBuffer = readFileMaybeEncrypted(dbPath, null);
+    const db = new SQL.Database(fileBuffer);
 
-      // Find entry by key
-      const getStmt = db.prepare(`
-        SELECT id, key, namespace, content, embedding, access_count, created_at, updated_at, tags
-        FROM memory_entries
-        WHERE ${liveMemoryRowSql()}
-          AND key = ?
-          AND namespace = ?
-        LIMIT 1
-      `);
-      getStmt.bind([key, namespace]);
-      const getRows: unknown[][] = [];
-      while (getStmt.step()) {
-        getRows.push(getStmt.get());
-      }
-      getStmt.free();
-      const result = getRows.length > 0 ? [{ values: getRows }] : [];
+    // Find entry by key
+    const getStmt = db.prepare(`
+      SELECT id, key, namespace, content, embedding, access_count, created_at, updated_at, tags
+      FROM memory_entries
+      WHERE ${liveMemoryRowSql()}
+        AND key = ?
+        AND namespace = ?
+      LIMIT 1
+    `);
+    getStmt.bind([key, namespace]);
+    const getRows: unknown[][] = [];
+    while (getStmt.step()) {
+      getRows.push(getStmt.get());
+    }
+    getStmt.free();
+    const result = getRows.length > 0 ? [{ values: getRows }] : [];
 
-      if (!result[0]?.values?.[0]) {
-        db.close();
-        return { success: true, found: false };
-      }
-
-      const [id, entryKey, ns, content, embedding, accessCount, createdAt, updatedAt, tagsJson] = result[0].values[0] as [
-        string, string, string, string, string | null, number, string, string, string | null
-      ];
-
-      // Update access count
-      db.run(`
-        UPDATE memory_entries
-        SET access_count = access_count + 1, last_accessed_at = strftime('%s', 'now') * 1000
-        WHERE id = ?
-      `, [String(id)]);
-
-      // Save updated database
-      const data = db.export();
-      writeDbImagePreservingFormat(dbPath, data);
-
+    if (!result[0]?.values?.[0]) {
       db.close();
+      return { success: true, found: false };
+    }
 
-      let tags: string[] = [];
-      if (tagsJson) {
-        try {
-          tags = JSON.parse(tagsJson);
-        } catch {
-          // Invalid JSON
-        }
+    const [id, entryKey, ns, content, embedding, accessCount, createdAt, updatedAt, tagsJson] = result[0].values[0] as [
+      string, string, string, string, string | null, number, string, string, string | null
+    ];
+
+    // Read-only: do NOT bump access_count or re-persist the image (#4734).
+    // The response below still returns accessCount = stored + 1 for display.
+    db.close();
+
+    let tags: string[] = [];
+    if (tagsJson) {
+      try {
+        tags = JSON.parse(tagsJson);
+      } catch {
+        // Invalid JSON
       }
+    }
 
-      return {
-        success: true,
-        found: true,
-        entry: {
-          id: String(id),
-          key: entryKey || String(id),
-          namespace: ns || 'default',
-          content: content || '',
-          accessCount: (accessCount || 0) + 1,
-          createdAt: createdAt || new Date().toISOString(),
-          updatedAt: updatedAt || new Date().toISOString(),
-          hasEmbedding: !!embedding && embedding.length > 10,
-          tags
-        }
-      };
-    });
+    return {
+      success: true,
+      found: true,
+      entry: {
+        id: String(id),
+        key: entryKey || String(id),
+        namespace: ns || 'default',
+        content: content || '',
+        accessCount: (accessCount || 0) + 1,
+        createdAt: createdAt || new Date().toISOString(),
+        updatedAt: updatedAt || new Date().toISOString(),
+        hasEmbedding: !!embedding && embedding.length > 10,
+        tags
+      }
+    };
   } catch (error) {
     return {
       success: false,

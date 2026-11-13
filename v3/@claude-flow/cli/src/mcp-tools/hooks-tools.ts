@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, statSync, unlinkSyn
 import * as nodeFs from 'fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { type MCPTool, getProjectCwd } from './types.js';
+import { dispatchQueueDir } from '../services/dispatch-queue.js';
 import { validateIdentifier, validateText, validatePath } from './validate-input.js';
 import { realpathNearest, isInsideRealRoot } from './realpath-containment.js';
 import { commandRecordingDisabled, redactCommandForStorage } from '../services/command-recording.js';
@@ -22,8 +23,17 @@ import {
   DEFAULT_ROUTER_EMBEDDER,
   embedForRouter,
   resolveRouterEmbedder,
+  routerEmbedderModel,
   type RouterEmbedderKind,
 } from '../ruvector/router-embedder.js';
+import {
+  ABSTAIN_LABEL,
+  centroidRouterEnabled,
+  classify,
+  loadCentroidArtifact,
+  resolveMargin,
+  type CentroidDecision,
+} from '../ruvector/centroid-router.js';
 
 // Real vector search functions - lazy loaded to avoid circular imports
 let searchEntriesFn: ((options: {
@@ -1356,6 +1366,7 @@ export const hooksRoute: MCPTool = {
               complexity,
             },
             swarmRecommendation: agents.length > 2 ? { topology: 'hierarchical', agents, coordination: 'queen-led' } : null,
+            ...centroidBypassed(`AgentDB ${agentdbRoute.controller}`, agents[0]),
           };
         }
       } catch {
@@ -1404,6 +1415,7 @@ export const hooksRoute: MCPTool = {
             },
             swarmRecommendation: null,
             learning: { source: suggestion.source, matchedKeywords: suggestion.matchedKeywords },
+            ...centroidBypassed('a persisted SONA pattern', suggestion.agent),
           };
         }
       } catch {
@@ -1421,6 +1433,40 @@ export const hooksRoute: MCPTool = {
  * so the benchmark measures this local path. (Body kept at its original
  * indentation to keep this refactor's diff small.)
  */
+/**
+ * ADR-527 centroid routing for one query. Returns null when the flag is off.
+ * Never throws: an unusable artifact or embedder comes back as `unavailable`.
+ */
+/**
+ * ADR-527: learned routes (AgentDB, persisted SONA patterns) answer before the
+ * centroid router. Say so under the flag, so a pilot's fallback rate counts them.
+ */
+function centroidBypassed(by: string, agent: string): { centroid?: CentroidDecision & { baselineAgent: string } } {
+  return centroidRouterEnabled()
+    ? { centroid: { status: 'bypassed', reason: `${by} answered before the centroid router`, baselineAgent: agent } }
+    : {};
+}
+
+async function centroidRoute(
+  queryText: string,
+  task: string,
+  baselineAgent: string,
+): Promise<(CentroidDecision & { baselineAgent: string }) | null> {
+  if (!centroidRouterEnabled()) return null;
+  try {
+    if (!hasRoutableText(task)) {
+      return { status: 'unavailable', reason: 'task has no letters or digits', baselineAgent };
+    }
+    const { artifact, error } = loadCentroidArtifact();
+    if (!artifact) return { status: 'unavailable', reason: error ?? 'centroid artifact unavailable', baselineAgent };
+    const q = await embedForRouter([queryText], 'minilm');
+    const d = classify(artifact, q.vectors[0], q.embedder, routerEmbedderModel(), resolveMargin(artifact));
+    return { ...d, ...(d.status === 'unavailable' && q.reason ? { reason: `${d.reason}; ${q.reason}` } : {}), baselineAgent };
+  } catch (err) {
+    return { status: 'unavailable', reason: `centroid router failed: ${err instanceof Error ? err.message : String(err)}`, baselineAgent };
+  }
+}
+
 async function routeTaskLocal(
   task: string,
   context: string | undefined,
@@ -1539,6 +1585,27 @@ async function routeTaskLocal(
       }
     }
 
+    // ADR-527: opt-in nearest-centroid router. The current router's pick is
+    // kept as `baselineAgent` so a pilot can compare the two on outcomes.
+    const centroid = await centroidRoute(queryText, task, agents[0]);
+    if (centroid?.status === 'decided') {
+      if (centroid.label === ABSTAIN_LABEL) {
+        noMatchDetail = `Centroid router: no agent fits (closest is "none", score ${centroid.score}).`;
+        matchedPattern = 'centroid-abstain';
+        confidence = NO_MATCH_CONFIDENCE; // #3567: a no-match ranks below every real match
+      } else {
+        agents = [centroid.label, ...agents.filter(a => a !== centroid.label)];
+        // Cosine runs about 0.2-0.6 here, so a raw score could rank a real match
+        // below a no-match (#3567). Rescale monotonically into (NO_MATCH, 1];
+        // the raw cosine stays in `centroid.score`. Not a probability.
+        confidence = Math.round((NO_MATCH_CONFIDENCE + 0.01 + (0.99 - NO_MATCH_CONFIDENCE) * Math.max(0, Math.min(1, centroid.score))) * 100) / 100;
+        matchedPattern = `centroid:${centroid.label}`;
+        noMatchDetail = null;
+      }
+      routingMethod = 'centroid';
+      backendInfo = 'nearest centroid (MiniLM)';
+    }
+
     // Determine complexity
     const taskLower = task.toLowerCase();
     const complexity = taskLower.includes('complex') || taskLower.includes('architecture') || task.length > 200
@@ -1566,7 +1633,9 @@ async function routeTaskLocal(
       primaryAgent: {
         type: agents[0],
         confidence: Math.round(confidence * 100) / 100,
-        reason: routingMethod.startsWith('semantic')
+        reason: routingMethod === 'centroid' && noMatchDetail === null
+          ? `Nearest agent centroid (${Math.round(confidence * 100)}% cosine)`
+          : routingMethod.startsWith('semantic')
           ? `Semantic similarity to "${matchedPattern}" pattern (${Math.round(confidence * 100)}%)`
           : noMatchDetail !== null
             ? `Nothing matched; default suggestion only. ${noMatchDetail}`
@@ -1590,6 +1659,7 @@ async function routeTaskLocal(
       } : null,
       // ADR-390: which embedder the semantic index + query used ('hash' when degraded).
       embedder: handle.embedder,
+      ...(centroid ? { centroid } : {}),
       ...(handle.embedderReason ? { embedderReason: handle.embedderReason } : {}),
     };
 }
@@ -5060,14 +5130,17 @@ export const hooksWorkerDispatch: MCPTool = {
       // 3.7.0-alpha.11 the dispatch only updated a process-local Map that
       // the daemon (separate process) could never see, so `queued` was a
       // lie. The queue file makes it real and inspectable on disk.
-      const queueDir = join(cwd, '.claude-flow', 'daemon-queue');
+      // User state dir, keyed by project: a repository must not be able to ship queue entries.
+      const queueDir = dispatchQueueDir(cwd);
       const queuePath = join(queueDir, `${workerId}.json`);
       let queueWritten = false;
       try {
-        if (!existsSync(queueDir)) mkdirSync(queueDir, { recursive: true });
+        // Private to the user, like the other state under ~/.claude-flow.
+        if (!existsSync(queueDir)) mkdirSync(queueDir, { recursive: true, mode: 0o700 });
         writeFileSync(
           queuePath,
           JSON.stringify({ workerId, trigger, context, priority, enqueuedAt: new Date().toISOString() }, null, 2),
+          { mode: 0o600 },
         );
         queueWritten = true;
       } catch (err) {
@@ -5077,7 +5150,7 @@ export const hooksWorkerDispatch: MCPTool = {
       }
       if (queueWritten) {
         reportedStatus = 'queued';
-        note = `Worker queued for daemon (pid ${daemonPid}) at ${queuePath}. Daemon polls every 5s; processed entries move to .claude-flow/daemon-queue/.processed/. Poll hooks_worker-status until status === "completed".`;
+        note = `Worker queued for daemon (pid ${daemonPid}) at ${queuePath}. Daemon polls every 5s; processed entries move to ${join(queueDir, '.processed')}. Poll hooks_worker-status until status === "completed".`;
       } else {
         reportedStatus = 'mcp-only';
       }

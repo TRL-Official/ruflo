@@ -58,12 +58,21 @@ function makeCaller(): Caller {
   const worker = new Worker(new URL('./neon-doc-worker.js', import.meta.url), { workerData: { url, driver, sock }, execArgv });
   worker.unref(); // never keep a CLI process alive
   // NEON_TRACE=1|2: the number of round trips and their time, per process, to stderr at exit (diagnostics only;
-  // the same summary line as digital-twin's copy, which the store gates count)
-  const tr = (process.env.NEON_TRACE === '1' || process.env.NEON_TRACE === '2') ? { n: 0, ms: 0 } : null;
+  // the same summary line as digital-twin's copy, which the store gates count). NEON_TRACE=2 also lists every round
+  // trip in order, named by its first statement that is not the extra_float_digits pin, as digital-twin's copy does
+  // (the store gate recall-complete-test R9 reads that list to see the exact-scan statement).
+  const tr = (process.env.NEON_TRACE === '1' || process.env.NEON_TRACE === '2') ? { n: 0, ms: 0, list: [] as Array<[number, string]> } : null;
+  if (tr) process.on('exit', () => process.env.NEON_TRACE === '2' && process.stderr.write(tr.list.map(([d, w], i) => `[neon-trace #${i + 1}] ${d} ms ${w}`).join('\n') + '\n'));
   if (tr) process.on('exit', () => process.stderr.write(`[neon-trace doc] ${tr.n} round trips, ${tr.ms} ms\n`));
   return function call(stmts: Stmt[], cache?: LoadCache): Row[][] {
     const t0 = Date.now();
-    try { return call0(stmts, cache); } finally { if (tr) { tr.n++; tr.ms += Date.now() - t0; } }
+    try { return call0(stmts, cache); } finally {
+      if (tr) {
+        const d = Date.now() - t0; tr.n++; tr.ms += d;
+        const s0 = stmts.find((x) => !/^SET LOCAL extra_float_digits/.test(x.text)) || stmts[0];
+        if (s0) tr.list.push([d, s0.text.replace(/\s+/g, ' ').slice(0, 28) + ' [' + String((s0.params || [])[0]).slice(0, 50) + ']' + (cache ? ' (cacheable)' : '')]);
+      }
+    }
   };
   function call0(stmts: Stmt[], cache?: LoadCache): Row[][] {
     const sab = new SharedArrayBuffer(4);
